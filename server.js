@@ -5,10 +5,7 @@ const { chromium } = require("playwright");
 const app = express();
 
 app.use(express.json());
-
-app.use(cors({
-  origin: "*"
-}));
+app.use(cors({ origin: "*" }));
 
 app.get("/", function(req, res){
   res.json({
@@ -18,7 +15,6 @@ app.get("/", function(req, res){
 });
 
 app.post("/track-abf", async function(req, res){
-
   const tracking = String(req.body.tracking || "").trim();
 
   if(!tracking){
@@ -31,7 +27,6 @@ app.post("/track-abf", async function(req, res){
   let browser;
 
   try {
-
     browser = await chromium.launch({
       headless: true,
       args: [
@@ -41,78 +36,95 @@ app.post("/track-abf", async function(req, res){
       ]
     });
 
-    const page = await browser.newPage();
+    const page = await browser.newPage({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    });
 
-    await page.goto(
-      "https://view.arcb.com/nlo/tools/tracking",
-      {
-        waitUntil: "networkidle",
-        timeout: 60000
-      }
-    );
+    await page.goto("https://view.arcb.com/nlo/tools/tracking", {
+      waitUntil: "domcontentloaded",
+      timeout: 60000
+    });
 
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(10000);
 
-    const selectors = [
-      "input[aria-label*='Tracking']",
-      "input[placeholder*='Tracking']",
-      "input[name*='tracking']",
-      "input[id*='tracking']",
+    const inputSelectors = [
       "input[type='text']",
-      "textarea"
+      "input[type='search']",
+      "input:not([type])",
+      "textarea",
+      "[contenteditable='true']",
+      "input"
     ];
 
     let filled = false;
 
-    for(const selector of selectors){
-      const elements = await page.locator(selector).count();
+    for(const frame of page.frames()){
+      for(const selector of inputSelectors){
+        const count = await frame.locator(selector).count().catch(function(){ return 0; });
 
-      if(elements > 0){
-        const field = page.locator(selector).first();
-        await field.waitFor({
-          state: "visible",
-          timeout: 15000
-        });
-        await field.fill(tracking);
-        filled = true;
-        break;
+        for(let i = 0; i < count; i++){
+          const field = frame.locator(selector).nth(i);
+          const visible = await field.isVisible().catch(function(){ return false; });
+          const enabled = await field.isEnabled().catch(function(){ return false; });
+
+          if(visible && enabled){
+            await field.click();
+            await field.fill(tracking);
+            filled = true;
+            break;
+          }
+        }
+
+        if(filled) break;
       }
+
+      if(filled) break;
     }
 
     if(!filled){
-      throw new Error("ABF tracking input was not found after page loaded");
+      throw new Error("ABF tracking input was not found in page or frames");
     }
 
-    const buttons = [
+    await page.waitForTimeout(1000);
+
+    const buttonSelectors = [
       "button:has-text('Track Shipment')",
       "button:has-text('Track')",
       "input[type='submit']",
       "[role='button']:has-text('Track Shipment')",
-      "[role='button']:has-text('Track')"
+      "[role='button']:has-text('Track')",
+      "button"
     ];
 
     let clicked = false;
 
-    for(const selector of buttons){
-      const elements = await page.locator(selector).count();
+    for(const frame of page.frames()){
+      for(const selector of buttonSelectors){
+        const count = await frame.locator(selector).count().catch(function(){ return 0; });
 
-      if(elements > 0){
-        const button = page.locator(selector).first();
-        await button.waitFor({
-          state: "visible",
-          timeout: 15000
-        });
-        await button.click();
-        clicked = true;
-        break;
+        for(let i = 0; i < count; i++){
+          const button = frame.locator(selector).nth(i);
+          const visible = await button.isVisible().catch(function(){ return false; });
+          const enabled = await button.isEnabled().catch(function(){ return false; });
+
+          if(visible && enabled){
+            await button.click();
+            clicked = true;
+            break;
+          }
+        }
+
+        if(clicked) break;
       }
+
+      if(clicked) break;
     }
 
     if(!clicked){
-      throw new Error("ABF Track Shipment button was not found");
+      throw new Error("ABF Track Shipment button was not found in page or frames");
     }
 
-    await page.waitForTimeout(8000);
+    await page.waitForTimeout(10000);
 
     const finalUrl = page.url();
 
@@ -125,7 +137,6 @@ app.post("/track-abf", async function(req, res){
     });
 
   } catch(error){
-
     if(browser){
       await browser.close();
     }

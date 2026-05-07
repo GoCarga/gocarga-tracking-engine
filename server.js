@@ -49,7 +49,15 @@ async function fillInputBySelectors(page, selectors, value){
         if(visible && enabled){
           await field.evaluate(function(el, inputValue){
             el.focus();
-            el.value = inputValue;
+
+            if(el.tagName && el.tagName.toLowerCase() === "textarea"){
+              el.value = inputValue;
+            } else if(el.isContentEditable){
+              el.textContent = inputValue;
+            } else {
+              el.value = inputValue;
+            }
+
             el.dispatchEvent(new Event("input", { bubbles: true }));
             el.dispatchEvent(new Event("change", { bubbles: true }));
             el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
@@ -218,33 +226,27 @@ app.post("/track-saia", async function(req, res){
     }
 
     const filled = await fillInputBySelectors(page, [
-      "input[placeholder*='PRO']",
-      "input[aria-label*='PRO']",
-      "input[name*='pro']",
-      "input[id*='pro']",
-      "input[placeholder*='Tracking']",
-      "input[aria-label*='Tracking']",
-      "input[type='text']",
-      "input[type='search']",
-      "input:not([type])",
       "textarea",
-      "input"
+      "textarea[required]",
+      "textarea[placeholder*='PRO']",
+      "textarea[aria-label*='PRO']",
+      "textarea[name*='pro']",
+      "textarea[id*='pro']"
     ], tracking);
 
     if(!filled){
-      throw new Error("SAIA tracking input was not found");
+      throw new Error("SAIA PRO textarea was not found");
     }
 
     await page.waitForTimeout(3000);
 
     const clicked = await clickBySelectors(page, [
+      "button:has-text('TRACK')",
       "button:has-text('Track')",
-      "button:has-text('Search')",
-      "button:has-text('Submit')",
+      "button[type='submit']",
       "input[type='submit']",
-      "[role='button']:has-text('Track')",
-      "[role='button']:has-text('Search')",
-      "button"
+      "[role='button']:has-text('TRACK')",
+      "[role='button']:has-text('Track')"
     ]);
 
     if(!clicked){

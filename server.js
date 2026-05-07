@@ -72,6 +72,52 @@ async function fillInputBySelectors(page, selectors, value){
   return false;
 }
 
+async function typeIntoTextarea(page, value){
+  for(const frame of page.frames()){
+    const count = await frame.locator("textarea").count().catch(function(){
+      return 0;
+    });
+
+    for(let i = 0; i < count; i++){
+      const textarea = frame.locator("textarea").nth(i);
+
+      const visible = await textarea.isVisible().catch(function(){
+        return false;
+      });
+
+      const enabled = await textarea.isEnabled().catch(function(){
+        return false;
+      });
+
+      if(visible && enabled){
+        await textarea.click({
+          force: true,
+          timeout: 10000
+        });
+
+        await textarea.press("Control+A").catch(function(){});
+        await textarea.press("Meta+A").catch(function(){});
+        await textarea.fill("");
+        await textarea.type(value, {
+          delay: 70
+        });
+
+        await textarea.evaluate(function(el){
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true }));
+          el.blur();
+        });
+
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 async function clickBySelectors(page, selectors){
   for(const frame of page.frames()){
     for(const selector of selectors){
@@ -225,16 +271,9 @@ app.post("/track-saia", async function(req, res){
       });
     }
 
-    const filled = await fillInputBySelectors(page, [
-      "textarea",
-      "textarea[required]",
-      "textarea[placeholder*='PRO']",
-      "textarea[aria-label*='PRO']",
-      "textarea[name*='pro']",
-      "textarea[id*='pro']"
-    ], tracking);
+    const typed = await typeIntoTextarea(page, tracking);
 
-    if(!filled){
+    if(!typed){
       throw new Error("SAIA PRO textarea was not found");
     }
 
@@ -246,7 +285,8 @@ app.post("/track-saia", async function(req, res){
       "button[type='submit']",
       "input[type='submit']",
       "[role='button']:has-text('TRACK')",
-      "[role='button']:has-text('Track')"
+      "[role='button']:has-text('Track')",
+      "button"
     ]);
 
     if(!clicked){

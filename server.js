@@ -36,7 +36,8 @@ app.post("/track-abf", async function(req, res){
       headless: true,
       args: [
         "--no-sandbox",
-        "--disable-setuid-sandbox"
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage"
       ]
     });
 
@@ -45,16 +46,73 @@ app.post("/track-abf", async function(req, res){
     await page.goto(
       "https://view.arcb.com/nlo/tools/tracking",
       {
-        waitUntil: "domcontentloaded",
-        timeout: 45000
+        waitUntil: "networkidle",
+        timeout: 60000
       }
     );
 
-    await page.locator("input").first().fill(tracking);
-
-    await page.locator("button").first().click();
-
     await page.waitForTimeout(5000);
+
+    const selectors = [
+      "input[aria-label*='Tracking']",
+      "input[placeholder*='Tracking']",
+      "input[name*='tracking']",
+      "input[id*='tracking']",
+      "input[type='text']",
+      "textarea"
+    ];
+
+    let filled = false;
+
+    for(const selector of selectors){
+      const elements = await page.locator(selector).count();
+
+      if(elements > 0){
+        const field = page.locator(selector).first();
+        await field.waitFor({
+          state: "visible",
+          timeout: 15000
+        });
+        await field.fill(tracking);
+        filled = true;
+        break;
+      }
+    }
+
+    if(!filled){
+      throw new Error("ABF tracking input was not found after page loaded");
+    }
+
+    const buttons = [
+      "button:has-text('Track Shipment')",
+      "button:has-text('Track')",
+      "input[type='submit']",
+      "[role='button']:has-text('Track Shipment')",
+      "[role='button']:has-text('Track')"
+    ];
+
+    let clicked = false;
+
+    for(const selector of buttons){
+      const elements = await page.locator(selector).count();
+
+      if(elements > 0){
+        const button = page.locator(selector).first();
+        await button.waitFor({
+          state: "visible",
+          timeout: 15000
+        });
+        await button.click();
+        clicked = true;
+        break;
+      }
+    }
+
+    if(!clicked){
+      throw new Error("ABF Track Shipment button was not found");
+    }
+
+    await page.waitForTimeout(8000);
 
     const finalUrl = page.url();
 
@@ -62,6 +120,7 @@ app.post("/track-abf", async function(req, res){
 
     res.json({
       success: true,
+      tracking: tracking,
       finalUrl: finalUrl
     });
 

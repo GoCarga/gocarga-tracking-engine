@@ -28,6 +28,18 @@ async function launchBrowser(){
   });
 }
 
+function cleanTracking(value){
+  return String(value || "").trim().replace(/\s+/g, "");
+}
+
+function buildAaaUrl(tracking){
+  const url = new URL("https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx");
+  url.searchParams.set("AllAccounts", "True");
+  url.searchParams.set("ProNum", tracking);
+  url.searchParams.set("submit", "Ir");
+  return url.toString();
+}
+
 async function fillInputBySelectors(page, selectors, value){
   for(const frame of page.frames()){
     for(const selector of selectors){
@@ -84,53 +96,6 @@ async function fillInputBySelectors(page, selectors, value){
   return false;
 }
 
-async function typeInputBySelectors(page, selectors, value){
-  for(const frame of page.frames()){
-    for(const selector of selectors){
-      const count = await frame.locator(selector).count().catch(function(){
-        return 0;
-      });
-
-      for(let i = 0; i < count; i++){
-        const field = frame.locator(selector).nth(i);
-
-        const visible = await field.isVisible().catch(function(){
-          return false;
-        });
-
-        const enabled = await field.isEnabled().catch(function(){
-          return false;
-        });
-
-        if(visible && enabled){
-          await field.click({
-            force: true,
-            timeout: 10000
-          }).catch(function(){});
-
-          await field.press("Control+A").catch(function(){});
-          await field.press("Meta+A").catch(function(){});
-          await field.fill("").catch(function(){});
-          await field.type(value, {
-            delay: 50
-          });
-
-          await field.evaluate(function(el){
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-            el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
-            el.blur();
-          });
-
-          return true;
-        }
-      }
-    }
-  }
-
-  return false;
-}
-
 async function clickBySelectors(page, selectors){
   for(const frame of page.frames()){
     for(const selector of selectors){
@@ -164,7 +129,7 @@ async function clickBySelectors(page, selectors){
 }
 
 app.post("/track-abf", async function(req, res){
-  const tracking = String(req.body.tracking || "").trim();
+  const tracking = cleanTracking(req.body.tracking);
 
   if(!tracking){
     return res.status(400).json({
@@ -238,13 +203,14 @@ app.post("/track-abf", async function(req, res){
     return res.status(500).json({
       success: false,
       carrier: "ABF Freight",
-      error: error.message
+      error: error.message,
+      finalUrl: "https://view.arcb.com/nlo/tools/tracking"
     });
   }
 });
 
 app.post("/track-aaa", async function(req, res){
-  const tracking = String(req.body.tracking || "").trim();
+  const tracking = cleanTracking(req.body.tracking);
 
   if(!tracking){
     return res.status(400).json({
@@ -253,77 +219,14 @@ app.post("/track-aaa", async function(req, res){
     });
   }
 
-  let browser;
+  const finalUrl = buildAaaUrl(tracking);
 
-  try {
-    browser = await launchBrowser();
-
-    const page = await browser.newPage({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-    });
-
-    await page.goto("https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx", {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
-    });
-
-    await page.waitForTimeout(8000);
-
-    const filled = await typeInputBySelectors(page, [
-      "input[name*='Pro']",
-      "input[id*='Pro']",
-      "input[name*='pro']",
-      "input[id*='pro']",
-      "input[type='text']",
-      "textarea",
-      "input"
-    ], tracking);
-
-    if(!filled){
-      throw new Error("AAA Cooper PRO input was not found");
-    }
-
-    await page.waitForTimeout(2000);
-
-    const clicked = await clickBySelectors(page, [
-      "input[type='submit']",
-      "button:has-text('Track')",
-      "button:has-text('Submit')",
-      "button:has-text('Search')",
-      "[role='button']:has-text('Track')",
-      "[role='button']:has-text('Submit')",
-      "button"
-    ]);
-
-    if(!clicked){
-      throw new Error("AAA Cooper tracking button was not found");
-    }
-
-    await page.waitForTimeout(12000);
-
-    const finalUrl = page.url();
-
-    await browser.close();
-
-    return res.json({
-      success: true,
-      carrier: "AAA Cooper",
-      tracking: tracking,
-      finalUrl: finalUrl
-    });
-
-  } catch(error){
-    if(browser){
-      await browser.close();
-    }
-
-    return res.status(500).json({
-      success: false,
-      carrier: "AAA Cooper",
-      error: error.message,
-      finalUrl: "https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx"
-    });
-  }
+  return res.json({
+    success: true,
+    carrier: "AAA Cooper",
+    tracking: tracking,
+    finalUrl: finalUrl
+  });
 });
 
 const port = process.env.PORT || 3000;

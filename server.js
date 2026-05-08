@@ -23,7 +23,8 @@ async function launchBrowser(){
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage"
+      "--disable-dev-shm-usage",
+      "--disable-blink-features=AutomationControlled"
     ]
   });
 }
@@ -32,15 +33,7 @@ function cleanTracking(value){
   return String(value || "").trim().replace(/\s+/g, "");
 }
 
-function buildAaaUrl(tracking){
-  const url = new URL("https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx");
-  url.searchParams.set("AllAccounts", "True");
-  url.searchParams.set("ProNum", tracking);
-  url.searchParams.set("submit", "Ir");
-  return url.toString();
-}
-
-async function fillInputBySelectors(page, selectors, value){
+async function setInputValue(page, selectors, value){
   for(const frame of page.frames()){
     for(const selector of selectors){
       const count = await frame.locator(selector).count().catch(function(){
@@ -59,32 +52,25 @@ async function fillInputBySelectors(page, selectors, value){
         });
 
         if(visible && enabled){
-          await field.evaluate(function(el, inputValue){
-            el.focus();
-
-            if(el.isContentEditable){
-              el.textContent = inputValue;
-            } else {
+          await field.click({ force: true, timeout: 10000 }).catch(function(){});
+          await field.fill("").catch(function(){});
+          await field.type(value, { delay: 80 }).catch(async function(){
+            await field.evaluate(function(el, inputValue){
+              el.focus();
               el.value = inputValue;
-            }
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+              el.dispatchEvent(new Event("change", { bubbles: true }));
+              el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "1" }));
+              el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "1" }));
+              el.blur();
+            }, value);
+          });
 
-            const eventOptions = {
-              bubbles: true,
-              cancelable: true
-            };
-
-            el.dispatchEvent(new Event("input", eventOptions));
-            el.dispatchEvent(new Event("change", eventOptions));
-            el.dispatchEvent(new KeyboardEvent("keydown", {
-              bubbles: true,
-              cancelable: true,
-              key: "1"
-            }));
-            el.dispatchEvent(new KeyboardEvent("keyup", {
-              bubbles: true,
-              cancelable: true,
-              key: "1"
-            }));
+          await field.evaluate(function(el, inputValue){
+            el.value = inputValue;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
           }, value);
 
           return true;
@@ -115,8 +101,10 @@ async function clickBySelectors(page, selectors){
         });
 
         if(visible && enabled){
-          await button.evaluate(function(el){
-            el.click();
+          await button.click({ force: true, timeout: 10000 }).catch(async function(){
+            await button.evaluate(function(el){
+              el.click();
+            });
           });
 
           return true;
@@ -154,7 +142,7 @@ app.post("/track-abf", async function(req, res){
 
     await page.waitForTimeout(10000);
 
-    const filled = await fillInputBySelectors(page, [
+    const filled = await setInputValue(page, [
       "input[aria-label*='Tracking']",
       "input[type='text']",
       "input[type='search']",
@@ -219,14 +207,90 @@ app.post("/track-aaa", async function(req, res){
     });
   }
 
-  const finalUrl = buildAaaUrl(tracking);
+  let browser;
 
-  return res.json({
-    success: true,
-    carrier: "AAA Cooper",
-    tracking: tracking,
-    finalUrl: finalUrl
-  });
+  try {
+    browser = await launchBrowser();
+
+    const page = await browser.newPage({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+      viewport: {
+        width: 1366,
+        height: 768
+      }
+    });
+
+    await page.goto("https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx", {
+      waitUntil: "networkidle",
+      timeout: 60000
+    });
+
+    await page.waitForTimeout(6000);
+
+    const filled = await setInputValue(page, [
+      "input[name='ProNum']",
+      "input[id='ProNum']",
+      "input[name*='Pro']",
+      "input[id*='Pro']",
+      "input[name*='pro']",
+      "input[id*='pro']",
+      "input[placeholder*='PRO']",
+      "input[placeholder*='Pro']",
+      "input[type='text']",
+      "textarea",
+      "input"
+    ], tracking);
+
+    if(!filled){
+      throw new Error("AAA Cooper PRO input was not found");
+    }
+
+    await page.waitForTimeout(1500);
+
+    const clicked = await clickBySelectors(page, [
+      "input[type='submit'][value*='Track']",
+      "input[type='submit'][value*='Submit']",
+      "input[type='submit'][value*='Search']",
+      "input[type='submit']",
+      "button:has-text('Track')",
+      "button:has-text('Submit')",
+      "button:has-text('Search')",
+      "a:has-text('Track')",
+      "a:has-text('Submit')",
+      "[role='button']:has-text('Track')",
+      "[role='button']:has-text('Submit')",
+      "button"
+    ]);
+
+    if(!clicked){
+      await page.keyboard.press("Enter").catch(function(){});
+    }
+
+    await page.waitForTimeout(12000);
+
+    const finalUrl = page.url();
+
+    await browser.close();
+
+    return res.json({
+      success: true,
+      carrier: "AAA Cooper",
+      tracking: tracking,
+      finalUrl: finalUrl
+    });
+
+  } catch(error){
+    if(browser){
+      await browser.close();
+    }
+
+    return res.status(500).json({
+      success: false,
+      carrier: "AAA Cooper",
+      error: error.message,
+      finalUrl: "https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx"
+    });
+  }
 });
 
 const port = process.env.PORT || 3000;

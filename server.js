@@ -4,7 +4,7 @@ const { chromium } = require("playwright");
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 app.use(cors({
   origin: "*"
@@ -13,7 +13,8 @@ app.use(cors({
 app.get("/", function(req, res){
   res.json({
     ok: true,
-    service: "GoCarga Tracking Engine"
+    service: "GoCarga Tracking Engine",
+    routes: ["/track-abf", "/track-aaa", "/debug-aaa"]
   });
 });
 
@@ -31,6 +32,62 @@ async function launchBrowser(){
 
 function cleanTracking(value){
   return String(value || "").trim().replace(/\s+/g, "");
+}
+
+async function getPageReport(page){
+  const report = await page.evaluate(function(){
+    const inputList = Array.from(document.querySelectorAll("input, textarea")).map(function(el, index){
+      return {
+        index: index,
+        tag: el.tagName,
+        type: el.getAttribute("type") || "",
+        id: el.getAttribute("id") || "",
+        name: el.getAttribute("name") || "",
+        placeholder: el.getAttribute("placeholder") || "",
+        value: el.value || "",
+        visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+      };
+    });
+
+    const buttonList = Array.from(document.querySelectorAll("button, input[type='submit'], input[type='button'], a")).map(function(el, index){
+      return {
+        index: index,
+        tag: el.tagName,
+        type: el.getAttribute("type") || "",
+        id: el.getAttribute("id") || "",
+        name: el.getAttribute("name") || "",
+        value: el.getAttribute("value") || "",
+        text: (el.innerText || el.textContent || "").trim().slice(0, 120),
+        href: el.getAttribute("href") || "",
+        visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+      };
+    });
+
+    const forms = Array.from(document.querySelectorAll("form")).map(function(el, index){
+      return {
+        index: index,
+        id: el.getAttribute("id") || "",
+        name: el.getAttribute("name") || "",
+        action: el.getAttribute("action") || "",
+        method: el.getAttribute("method") || ""
+      };
+    });
+
+    return {
+      title: document.title,
+      url: window.location.href,
+      bodyText: document.body ? document.body.innerText.slice(0, 2500) : "",
+      inputs: inputList,
+      buttons: buttonList,
+      forms: forms
+    };
+  }).catch(function(error){
+    return {
+      error: error.message
+    };
+  });
+
+  return report;
 }
 
 async function setInputValue(page, selectors, value){
@@ -73,13 +130,19 @@ async function setInputValue(page, selectors, value){
             el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
           }, value);
 
-          return true;
+          return {
+            success: true,
+            selector: selector,
+            frameUrl: frame.url()
+          };
         }
       }
     }
   }
 
-  return false;
+  return {
+    success: false
+  };
 }
 
 async function clickBySelectors(page, selectors){
@@ -107,13 +170,19 @@ async function clickBySelectors(page, selectors){
             });
           });
 
-          return true;
+          return {
+            success: true,
+            selector: selector,
+            frameUrl: frame.url()
+          };
         }
       }
     }
   }
 
-  return false;
+  return {
+    success: false
+  };
 }
 
 app.post("/track-abf", async function(req, res){
@@ -151,7 +220,7 @@ app.post("/track-abf", async function(req, res){
       "input"
     ], tracking);
 
-    if(!filled){
+    if(!filled.success){
       throw new Error("ABF tracking input was not found");
     }
 
@@ -166,7 +235,7 @@ app.post("/track-abf", async function(req, res){
       "button"
     ]);
 
-    if(!clicked){
+    if(!clicked.success){
       throw new Error("ABF Track Shipment button was not found");
     }
 
@@ -225,11 +294,15 @@ app.post("/track-aaa", async function(req, res){
       timeout: 60000
     });
 
-    await page.waitForTimeout(6000);
+    await page.waitForTimeout(7000);
+
+    const beforeReport = await getPageReport(page);
 
     const filled = await setInputValue(page, [
       "input[name='ProNum']",
       "input[id='ProNum']",
+      "input[name='pronum']",
+      "input[id='pronum']",
       "input[name*='Pro']",
       "input[id*='Pro']",
       "input[name*='pro']",
@@ -241,11 +314,13 @@ app.post("/track-aaa", async function(req, res){
       "input"
     ], tracking);
 
-    if(!filled){
-      throw new Error("AAA Cooper PRO input was not found");
+    if(!filled.success){
+      throw new Error("AAA Cooper PRO input was not found. Page report: " + JSON.stringify(beforeReport).slice(0, 3000));
     }
 
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(2000);
+
+    const afterFillReport = await getPageReport(page);
 
     const clicked = await clickBySelectors(page, [
       "input[type='submit'][value*='Track']",
@@ -262,12 +337,13 @@ app.post("/track-aaa", async function(req, res){
       "button"
     ]);
 
-    if(!clicked){
+    if(!clicked.success){
       await page.keyboard.press("Enter").catch(function(){});
     }
 
     await page.waitForTimeout(12000);
 
+    const afterClickReport = await getPageReport(page);
     const finalUrl = page.url();
 
     await browser.close();
@@ -276,7 +352,14 @@ app.post("/track-aaa", async function(req, res){
       success: true,
       carrier: "AAA Cooper",
       tracking: tracking,
-      finalUrl: finalUrl
+      finalUrl: finalUrl,
+      debug: {
+        filled: filled,
+        clicked: clicked,
+        before: beforeReport,
+        afterFill: afterFillReport,
+        afterClick: afterClickReport
+      }
     });
 
   } catch(error){
@@ -289,6 +372,108 @@ app.post("/track-aaa", async function(req, res){
       carrier: "AAA Cooper",
       error: error.message,
       finalUrl: "https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx"
+    });
+  }
+});
+
+app.post("/debug-aaa", async function(req, res){
+  const tracking = cleanTracking(req.body.tracking);
+
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+
+    const page = await browser.newPage({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+      viewport: {
+        width: 1366,
+        height: 768
+      }
+    });
+
+    await page.goto("https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx", {
+      waitUntil: "networkidle",
+      timeout: 60000
+    });
+
+    await page.waitForTimeout(7000);
+
+    const beforeReport = await getPageReport(page);
+
+    const filled = tracking ? await setInputValue(page, [
+      "input[name='ProNum']",
+      "input[id='ProNum']",
+      "input[name='pronum']",
+      "input[id='pronum']",
+      "input[name*='Pro']",
+      "input[id*='Pro']",
+      "input[name*='pro']",
+      "input[id*='pro']",
+      "input[placeholder*='PRO']",
+      "input[placeholder*='Pro']",
+      "input[type='text']",
+      "textarea",
+      "input"
+    ], tracking) : { success: false };
+
+    await page.waitForTimeout(2000);
+
+    const afterFillReport = await getPageReport(page);
+
+    const clicked = tracking ? await clickBySelectors(page, [
+      "input[type='submit'][value*='Track']",
+      "input[type='submit'][value*='Submit']",
+      "input[type='submit'][value*='Search']",
+      "input[type='submit']",
+      "button:has-text('Track')",
+      "button:has-text('Submit')",
+      "button:has-text('Search')",
+      "a:has-text('Track')",
+      "a:has-text('Submit')",
+      "[role='button']:has-text('Track')",
+      "[role='button']:has-text('Submit')",
+      "button"
+    ]) : { success: false };
+
+    if(tracking && !clicked.success){
+      await page.keyboard.press("Enter").catch(function(){});
+    }
+
+    await page.waitForTimeout(12000);
+
+    const afterClickReport = await getPageReport(page);
+    const screenshot = await page.screenshot({
+      fullPage: true,
+      type: "png"
+    });
+
+    const finalUrl = page.url();
+
+    await browser.close();
+
+    return res.json({
+      success: true,
+      carrier: "AAA Cooper",
+      tracking: tracking,
+      finalUrl: finalUrl,
+      filled: filled,
+      clicked: clicked,
+      before: beforeReport,
+      afterFill: afterFillReport,
+      afterClick: afterClickReport,
+      screenshotBase64: screenshot.toString("base64")
+    });
+
+  } catch(error){
+    if(browser){
+      await browser.close();
+    }
+
+    return res.status(500).json({
+      success: false,
+      carrier: "AAA Cooper",
+      error: error.message
     });
   }
 });

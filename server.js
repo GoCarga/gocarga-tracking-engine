@@ -49,11 +49,78 @@ async function fillInputBySelectors(page, selectors, value){
         if(visible && enabled){
           await field.evaluate(function(el, inputValue){
             el.focus();
-            el.value = inputValue;
+
+            if(el.isContentEditable){
+              el.textContent = inputValue;
+            } else {
+              el.value = inputValue;
+            }
+
+            const eventOptions = {
+              bubbles: true,
+              cancelable: true
+            };
+
+            el.dispatchEvent(new Event("input", eventOptions));
+            el.dispatchEvent(new Event("change", eventOptions));
+            el.dispatchEvent(new KeyboardEvent("keydown", {
+              bubbles: true,
+              cancelable: true,
+              key: "1"
+            }));
+            el.dispatchEvent(new KeyboardEvent("keyup", {
+              bubbles: true,
+              cancelable: true,
+              key: "1"
+            }));
+          }, value);
+
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+async function typeInputBySelectors(page, selectors, value){
+  for(const frame of page.frames()){
+    for(const selector of selectors){
+      const count = await frame.locator(selector).count().catch(function(){
+        return 0;
+      });
+
+      for(let i = 0; i < count; i++){
+        const field = frame.locator(selector).nth(i);
+
+        const visible = await field.isVisible().catch(function(){
+          return false;
+        });
+
+        const enabled = await field.isEnabled().catch(function(){
+          return false;
+        });
+
+        if(visible && enabled){
+          await field.click({
+            force: true,
+            timeout: 10000
+          }).catch(function(){});
+
+          await field.press("Control+A").catch(function(){});
+          await field.press("Meta+A").catch(function(){});
+          await field.fill("").catch(function(){});
+          await field.type(value, {
+            delay: 50
+          });
+
+          await field.evaluate(function(el){
             el.dispatchEvent(new Event("input", { bubbles: true }));
             el.dispatchEvent(new Event("change", { bubbles: true }));
             el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
-          }, value);
+            el.blur();
+          });
 
           return true;
         }
@@ -176,7 +243,7 @@ app.post("/track-abf", async function(req, res){
   }
 });
 
-app.post("/track-saia", async function(req, res){
+app.post("/track-aaa", async function(req, res){
   const tracking = String(req.body.tracking || "").trim();
 
   if(!tracking){
@@ -195,87 +262,44 @@ app.post("/track-saia", async function(req, res){
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     });
 
-    await page.goto("https://www.saia.com/track", {
+    await page.goto("https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx", {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
-    await page.waitForTimeout(12000);
+    await page.waitForTimeout(8000);
 
-    const captchaVisible = await page.locator("iframe[src*='recaptcha'], .g-recaptcha, text=I'm not a robot").count().catch(function(){
-      return 0;
-    });
+    const filled = await typeInputBySelectors(page, [
+      "input[name*='Pro']",
+      "input[id*='Pro']",
+      "input[name*='pro']",
+      "input[id*='pro']",
+      "input[type='text']",
+      "textarea",
+      "input"
+    ], tracking);
 
-    if(captchaVisible > 0){
-      await browser.close();
-
-      return res.status(409).json({
-        success: false,
-        carrier: "SAIA",
-        error: "SAIA is showing a CAPTCHA. Manual verification is required.",
-        finalUrl: "https://www.saia.com/track"
-      });
+    if(!filled){
+      throw new Error("AAA Cooper PRO input was not found");
     }
 
-    const saiaFilled = await page.evaluate(function(value){
-      const fields = Array.from(document.querySelectorAll("textarea, input"));
-      const field = document.querySelector("#trackingNumbers") ||
-        document.querySelector("textarea[formcontrolname='proNumbers']") ||
-        document.querySelector("textarea[name*='pro']") ||
-        document.querySelector("textarea");
+    await page.waitForTimeout(2000);
 
-      if(!field){
-        return false;
-      }
-
-      field.focus();
-      field.value = value;
-
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype,
-        "value"
-      );
-
-      if(nativeInputValueSetter && nativeInputValueSetter.set){
-        nativeInputValueSetter.set.call(field, value);
-      }
-
-      field.dispatchEvent(new Event("input", { bubbles: true }));
-      field.dispatchEvent(new Event("change", { bubbles: true }));
-      field.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "1" }));
-      field.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "1" }));
-      field.blur();
-
-      return true;
-    }, tracking);
-
-    if(!saiaFilled){
-      throw new Error("SAIA PRO textarea was not found");
-    }
-
-    await page.waitForTimeout(3000);
-
-    const clicked = await page.evaluate(function(){
-      const buttons = Array.from(document.querySelectorAll("button, input[type='submit'], [role='button']"));
-
-      const button = buttons.find(function(el){
-        const text = (el.innerText || el.value || el.textContent || "").trim().toUpperCase();
-        return text.includes("TRACK");
-      });
-
-      if(button){
-        button.click();
-        return true;
-      }
-
-      return false;
-    });
+    const clicked = await clickBySelectors(page, [
+      "input[type='submit']",
+      "button:has-text('Track')",
+      "button:has-text('Submit')",
+      "button:has-text('Search')",
+      "[role='button']:has-text('Track')",
+      "[role='button']:has-text('Submit')",
+      "button"
+    ]);
 
     if(!clicked){
-      throw new Error("SAIA Track button was not found");
+      throw new Error("AAA Cooper tracking button was not found");
     }
 
-    await page.waitForTimeout(15000);
+    await page.waitForTimeout(12000);
 
     const finalUrl = page.url();
 
@@ -283,7 +307,7 @@ app.post("/track-saia", async function(req, res){
 
     return res.json({
       success: true,
-      carrier: "SAIA",
+      carrier: "AAA Cooper",
       tracking: tracking,
       finalUrl: finalUrl
     });
@@ -295,8 +319,9 @@ app.post("/track-saia", async function(req, res){
 
     return res.status(500).json({
       success: false,
-      carrier: "SAIA",
-      error: error.message
+      carrier: "AAA Cooper",
+      error: error.message,
+      finalUrl: "https://www.aaacooper.com/pwb/Transit/ProTrackResults.aspx"
     });
   }
 });

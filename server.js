@@ -49,15 +49,7 @@ async function fillInputBySelectors(page, selectors, value){
         if(visible && enabled){
           await field.evaluate(function(el, inputValue){
             el.focus();
-
-            if(el.tagName && el.tagName.toLowerCase() === "textarea"){
-              el.value = inputValue;
-            } else if(el.isContentEditable){
-              el.textContent = inputValue;
-            } else {
-              el.value = inputValue;
-            }
-
+            el.value = inputValue;
             el.dispatchEvent(new Event("input", { bubbles: true }));
             el.dispatchEvent(new Event("change", { bubbles: true }));
             el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
@@ -65,52 +57,6 @@ async function fillInputBySelectors(page, selectors, value){
 
           return true;
         }
-      }
-    }
-  }
-
-  return false;
-}
-
-async function typeIntoTextarea(page, value){
-  for(const frame of page.frames()){
-    const count = await frame.locator("textarea").count().catch(function(){
-      return 0;
-    });
-
-    for(let i = 0; i < count; i++){
-      const textarea = frame.locator("textarea").nth(i);
-
-      const visible = await textarea.isVisible().catch(function(){
-        return false;
-      });
-
-      const enabled = await textarea.isEnabled().catch(function(){
-        return false;
-      });
-
-      if(visible && enabled){
-        await textarea.click({
-          force: true,
-          timeout: 10000
-        });
-
-        await textarea.press("Control+A").catch(function(){});
-        await textarea.press("Meta+A").catch(function(){});
-        await textarea.fill("");
-        await textarea.type(value, {
-          delay: 70
-        });
-
-        await textarea.evaluate(function(el){
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-          el.dispatchEvent(new Event("change", { bubbles: true }));
-          el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
-          el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true }));
-          el.blur();
-        });
-
-        return true;
       }
     }
   }
@@ -271,23 +217,59 @@ app.post("/track-saia", async function(req, res){
       });
     }
 
-    const typed = await typeIntoTextarea(page, tracking);
+    const saiaFilled = await page.evaluate(function(value){
+      const fields = Array.from(document.querySelectorAll("textarea, input"));
+      const field = document.querySelector("#trackingNumbers") ||
+        document.querySelector("textarea[formcontrolname='proNumbers']") ||
+        document.querySelector("textarea[name*='pro']") ||
+        document.querySelector("textarea");
 
-    if(!typed){
+      if(!field){
+        return false;
+      }
+
+      field.focus();
+      field.value = value;
+
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value"
+      );
+
+      if(nativeInputValueSetter && nativeInputValueSetter.set){
+        nativeInputValueSetter.set.call(field, value);
+      }
+
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+      field.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "1" }));
+      field.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "1" }));
+      field.blur();
+
+      return true;
+    }, tracking);
+
+    if(!saiaFilled){
       throw new Error("SAIA PRO textarea was not found");
     }
 
     await page.waitForTimeout(3000);
 
-    const clicked = await clickBySelectors(page, [
-      "button:has-text('TRACK')",
-      "button:has-text('Track')",
-      "button[type='submit']",
-      "input[type='submit']",
-      "[role='button']:has-text('TRACK')",
-      "[role='button']:has-text('Track')",
-      "button"
-    ]);
+    const clicked = await page.evaluate(function(){
+      const buttons = Array.from(document.querySelectorAll("button, input[type='submit'], [role='button']"));
+
+      const button = buttons.find(function(el){
+        const text = (el.innerText || el.value || el.textContent || "").trim().toUpperCase();
+        return text.includes("TRACK");
+      });
+
+      if(button){
+        button.click();
+        return true;
+      }
+
+      return false;
+    });
 
     if(!clicked){
       throw new Error("SAIA Track button was not found");

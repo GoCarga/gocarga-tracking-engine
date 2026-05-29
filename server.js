@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    routes: ["/track-abf", "/track-aaa", "/debug-aaa"]
+    routes: ["/track-abf", "/track-aaa", "/track-fedex", "/debug-aaa"]
   });
 });
 
@@ -375,6 +375,152 @@ app.post("/track-aaa", async function(req, res){
     });
   }
 });
+
+
+app.post("/track-fedex", async function(req, res){
+  const tracking = cleanTracking(req.body.tracking);
+
+  if(!tracking){
+    return res.status(400).json({
+      success: false,
+      error: "Tracking number required"
+    });
+  }
+
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+
+    const page = await browser.newPage({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+      viewport: {
+        width: 1366,
+        height: 768
+      }
+    });
+
+    const directUrl = "https://www.fedexfreight.com/fedextrack/?trknbr=" + encodeURIComponent(tracking) + "&trkqual=~" + encodeURIComponent(tracking) + "~FDFR";
+
+    await page.goto(directUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000
+    });
+
+    await page.waitForTimeout(12000);
+
+    let report = await getPageReport(page);
+    let bodyText = report && report.bodyText ? report.bodyText : "";
+    let finalUrl = page.url();
+
+    let found = false;
+    let blocked = false;
+
+    const lowerText = bodyText.toLowerCase();
+
+    if(lowerText.indexOf("captcha") >= 0 || lowerText.indexOf("verify you are human") >= 0 || lowerText.indexOf("access denied") >= 0){
+      blocked = true;
+    }
+
+    if(
+      lowerText.indexOf("delivered") >= 0 ||
+      lowerText.indexOf("in transit") >= 0 ||
+      lowerText.indexOf("picked up") >= 0 ||
+      lowerText.indexOf("shipment") >= 0 ||
+      lowerText.indexOf("estimated delivery") >= 0 ||
+      lowerText.indexOf(tracking.toLowerCase()) >= 0
+    ){
+      found = true;
+    }
+
+    if(!found && !blocked){
+      const filled = await setInputValue(page, [
+        "input[name*='trknbr']",
+        "input[id*='trknbr']",
+        "input[name*='tracking']",
+        "input[id*='tracking']",
+        "input[placeholder*='Tracking']",
+        "input[placeholder*='tracking']",
+        "input[placeholder*='PRO']",
+        "input[type='text']",
+        "input[type='search']",
+        "textarea",
+        "input"
+      ], tracking);
+
+      await page.waitForTimeout(2000);
+
+      const clicked = await clickBySelectors(page, [
+        "button:has-text('Track')",
+        "button:has-text('TRACK')",
+        "button:has-text('Submit')",
+        "button:has-text('Search')",
+        "input[type='submit']",
+        "input[type='button']",
+        "[role='button']:has-text('Track')",
+        "[role='button']:has-text('Search')",
+        "button"
+      ]);
+
+      if(!clicked.success){
+        await page.keyboard.press("Enter").catch(function(){});
+      }
+
+      await page.waitForTimeout(12000);
+
+      report = await getPageReport(page);
+      bodyText = report && report.bodyText ? report.bodyText : "";
+      finalUrl = page.url();
+
+      const updatedLowerText = bodyText.toLowerCase();
+
+      if(updatedLowerText.indexOf("captcha") >= 0 || updatedLowerText.indexOf("verify you are human") >= 0 || updatedLowerText.indexOf("access denied") >= 0){
+        blocked = true;
+      }
+
+      if(
+        updatedLowerText.indexOf("delivered") >= 0 ||
+        updatedLowerText.indexOf("in transit") >= 0 ||
+        updatedLowerText.indexOf("picked up") >= 0 ||
+        updatedLowerText.indexOf("shipment") >= 0 ||
+        updatedLowerText.indexOf("estimated delivery") >= 0 ||
+        updatedLowerText.indexOf(tracking.toLowerCase()) >= 0
+      ){
+        found = true;
+      }
+    }
+
+    await browser.close();
+
+    return res.json({
+      success: true,
+      carrier: "FedEx Freight",
+      tracking: tracking,
+      found: found,
+      blocked: blocked,
+      finalUrl: finalUrl,
+      pageText: bodyText.slice(0, 2500),
+      debug: {
+        title: report.title || "",
+        url: report.url || finalUrl
+      }
+    });
+
+  } catch(error){
+    if(browser){
+      await browser.close();
+    }
+
+    return res.status(500).json({
+      success: false,
+      carrier: "FedEx Freight",
+      tracking: tracking,
+      error: error.message,
+      finalUrl: "https://www.fedexfreight.com/fedextrack/?trknbr=" + encodeURIComponent(tracking) + "&trkqual=~" + encodeURIComponent(tracking) + "~FDFR"
+    });
+  }
+});
+
 
 app.post("/debug-aaa", async function(req, res){
   const tracking = cleanTracking(req.body.tracking);

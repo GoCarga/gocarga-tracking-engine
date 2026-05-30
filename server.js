@@ -14,10 +14,25 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.1",
-    routes: ["/track-fedex", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
+    version: "2.2",
+    routes: ["/track-fedex", "/test-fedex", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
+
+
+app.get("/test-fedex", function(req, res){
+  const tracking = cleanTracking(req.query.tracking || req.query.pro || "302326317091");
+
+  res.json({
+    success: true,
+    route: "/test-fedex",
+    message: "FedEx route file is live. This does not scrape FedEx.",
+    tracking: tracking,
+    officialFedExUrl: "https://www.fedexfreight.com/fedextrack/?trknbr=" + encodeURIComponent(tracking) + "&trkqual=~" + encodeURIComponent(tracking) + "~FDFR",
+    timestamp: new Date().toISOString()
+  });
+});
+
 
 app.get("/health", function(req, res){
   res.json({
@@ -406,7 +421,7 @@ async function scrapeDirectCarrier(options){
 
     await page.goto(url, {
       waitUntil: "domcontentloaded",
-      timeout: 45000
+      timeout: 60000
     });
 
     await page.waitForTimeout(waitFor);
@@ -465,7 +480,7 @@ async function scrapeFormCarrier(options){
 
     await page.goto(startUrl, {
       waitUntil: "domcontentloaded",
-      timeout: 45000
+      timeout: 60000
     });
 
     await page.waitForTimeout(waitFor);
@@ -695,7 +710,7 @@ app.post("/track-abf", async function(req, res){
       timeout: 60000
     });
 
-    await page.waitForTimeout(10000);
+    await page.waitForTimeout(14000);
 
     const filled = await setInputValue(page, [
       "input[aria-label*='Tracking']",
@@ -1036,7 +1051,7 @@ async function runFedExTracking(tracking){
 
     await page.goto(directUrl, {
       waitUntil: "domcontentloaded",
-      timeout: 45000
+      timeout: 60000
     });
 
     await page.waitForTimeout(10000);
@@ -1098,7 +1113,7 @@ async function runFedExTracking(tracking){
         await page.keyboard.press("Enter").catch(function(){});
       }
 
-      await page.waitForTimeout(8000);
+      await page.waitForTimeout(12000);
 
       report = await getPageReport(page);
       bodyText = report && report.bodyText ? report.bodyText : "";
@@ -1164,7 +1179,7 @@ app.post("/track-fedex", async function(req, res){
     });
   }
 
-  const result = await withTimeout(runFedExTracking(tracking), 26000, "FedEx Freight tracking");
+  const result = await withTimeout(runFedExTracking(tracking), 55000, "FedEx Freight tracking");
   return res.json(result);
 });
 
@@ -1178,7 +1193,7 @@ app.get("/track-fedex", async function(req, res){
     });
   }
 
-  const result = await withTimeout(runFedExTracking(tracking), 26000, "FedEx Freight tracking");
+  const result = await withTimeout(runFedExTracking(tracking), 55000, "FedEx Freight tracking");
   return res.json(result);
 });
 
@@ -1352,7 +1367,7 @@ app.post("/track", async function(req, res){
   }
 
   if(carrier.indexOf("fedex") >= 0){
-    const result = await withTimeout(runFedExTracking(tracking), 26000, "FedEx Freight tracking");
+    const result = await withTimeout(runFedExTracking(tracking), 55000, "FedEx Freight tracking");
     return res.json(result);
   }
 

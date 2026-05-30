@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.5",
+    version: "2.6",
     routes: ["/track-fedex", "/test-fedex", "/test-estes", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
@@ -464,6 +464,62 @@ function buildSimpleCarrierResponse(options){
     }
   };
 }
+
+
+async function expandEstesDetails(page){
+  const selectors = [
+    "button:has-text('Expand All')",
+    "a:has-text('Expand All')",
+    "[role='button']:has-text('Expand All')",
+    "button:has-text('Expand')",
+    "[aria-label*='Expand']",
+    "button[aria-label*='Expand']",
+    ".accordion button",
+    "button"
+  ];
+
+  for(const selector of selectors){
+    try{
+      const items = await page.locator(selector).all();
+      for(const item of items.slice(0, 8)){
+        try{
+          const text = cleanText(await item.innerText({ timeout: 500 }).catch(function(){ return ""; }));
+          const label = await item.getAttribute("aria-label").catch(function(){ return ""; });
+          if(/expand/i.test(text) || /expand/i.test(label || "")){
+            if(await item.isVisible({ timeout: 800 })){
+              await item.click({ force: true, timeout: 2500 }).catch(async function(){
+                await item.evaluate(function(el){ el.click(); }).catch(function(){});
+              });
+              await page.waitForTimeout(2500);
+              return true;
+            }
+          }
+        } catch(error){}
+      }
+    } catch(error){}
+  }
+
+  try{
+    await page.evaluate(function(){
+      const candidates = Array.from(document.querySelectorAll("button, a, [role='button']"));
+      const expand = candidates.find(function(el){
+        const text = (el.innerText || el.textContent || el.getAttribute("aria-label") || "").trim();
+        return /expand all|expand/i.test(text);
+      });
+
+      if(expand){
+        expand.click();
+        return true;
+      }
+
+      return false;
+    });
+    await page.waitForTimeout(2500);
+  } catch(error){}
+
+  return false;
+}
+
 
 async function scrapeDirectCarrier(options){
   const tracking = cleanTracking(options.tracking);
@@ -1336,7 +1392,11 @@ async function scrapeEstesTracking(tracking){
     }
 
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(function(){});
-    await page.waitForTimeout(15000);
+    await page.waitForTimeout(8000);
+
+    await expandEstesDetails(page);
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(function(){});
+    await page.waitForTimeout(6000);
 
     const report = await getPageReport(page);
     const finalUrl = page.url();
@@ -1371,7 +1431,6 @@ async function scrapeEstesTracking(tracking){
 
 function buildEstesCarrierResponse(options){
   const text = cleanTextValue(options.bodyText || "");
-  const lines = compactTrackingLines(text);
   const tracking = cleanTracking(options.tracking);
   const finalUrl = options.finalUrl || "https://www.estes-express.com/myestes/shipment-tracking/";
   const cookieOnly = text.indexOf("Shipment Tracking") >= 0 &&
@@ -1379,7 +1438,8 @@ function buildEstesCarrierResponse(options){
     text.indexOf("Tracking Results") < 0;
 
   const row = parseEstesResultsRow(text, tracking);
-  const hasResults = !!row.pro;
+  const details = parseEstesExpandedDetails(text, tracking);
+  const hasResults = !!row.pro || !!details.pro;
 
   if(cookieOnly || !hasResults){
     return {
@@ -1431,7 +1491,7 @@ function buildEstesCarrierResponse(options){
         travelHistory: []
       },
       source: "Render Estes Express",
-      pageText: text.slice(0, 15000),
+      pageText: text.slice(0, 20000),
       debug: {
         title: options.title || "",
         url: finalUrl
@@ -1439,38 +1499,36 @@ function buildEstesCarrierResponse(options){
     };
   }
 
-  const status = normalizeSimpleStatus(row.status || "Tracking Found");
+  const pro = details.pro || row.pro || tracking;
+  const bol = details.bol || row.bol || "";
+  const pickupDate = details.pickupDate || row.pickupDate || "";
+  const estimatedDelivery = details.estimatedDelivery || row.estimatedDelivery || "";
+  const deliveredDate = details.deliveryDate || "";
+  const status = normalizeSimpleStatus(details.status || row.status || "Tracking Found");
   const state = normalizeSimpleState(status);
   const isDelivered = state === "delivered";
 
-  const events = [];
+  const origin = details.shipperAddress || "";
+  const destination = details.consigneeAddress || "";
+  const currentLocation = isDelivered ? (destination || "Delivered") : (details.destinationServiceCenterName || "Estes Express");
+  const events = details.history.length ? details.history : [];
 
-  if(row.pickupDate){
+  if(!events.length && pickupDate){
     events.push({
       status: "We Have Your Shipment",
       description: "Pickup Date",
-      location: normalizeSimpleLocation("Estes Express"),
-      timestamp: row.pickupDate,
+      location: normalizeSimpleLocation(origin || "Estes Express"),
+      timestamp: pickupDate,
       completed: true
     });
   }
 
-  if(row.estimatedDelivery){
+  if(isDelivered){
     events.push({
-      status: "Estimated Delivery",
-      description: "Estimated delivery date",
-      location: normalizeSimpleLocation("Estes Express"),
-      timestamp: row.estimatedDelivery,
-      completed: !isDelivered
-    });
-  }
-
-  if(row.status){
-    events.push({
-      status: status,
-      description: status,
-      location: normalizeSimpleLocation("Estes Express"),
-      timestamp: row.estimatedDelivery || row.pickupDate || "Carrier update",
+      status: "Delivered",
+      description: "Delivery Completed - OK",
+      location: normalizeSimpleLocation(destination || "Estes Express"),
+      timestamp: deliveredDate || estimatedDelivery || pickupDate || "Carrier update",
       completed: true
     });
   }
@@ -1482,22 +1540,25 @@ function buildEstesCarrierResponse(options){
     reason: "",
     carrier: "Estes Express",
     tracking: tracking,
-    pro: row.pro || tracking,
+    pro: pro,
     status: status,
     state: state,
-    statusCopy: status,
-    service: "",
-    handlingUnits: "",
-    shipmentWeight: "",
+    statusCopy: isDelivered ? "Delivery Completed - OK" : status,
+    service: details.service || "Estes LTL Freight",
+    handlingUnits: details.pieces || "",
+    pieces: details.pieces || "",
+    totalPieces: details.pieces || "",
+    shipmentWeight: details.weight || "",
+    weight: details.weight || "",
     packagingType: "",
     eta: {
-      date: row.estimatedDelivery || "",
-      time: row.estimatedDelivery ? "Estes delivery date" : "",
+      date: deliveredDate || estimatedDelivery || "",
+      time: deliveredDate ? "Estes delivery scan" : estimatedDelivery ? "Estes estimated delivery" : "",
       estimated: !isDelivered
     },
-    origin: normalizeSimpleLocation(""),
-    destination: normalizeSimpleLocation(""),
-    current_location: normalizeSimpleLocation(isDelivered ? "Delivered" : "Estes Express"),
+    origin: normalizeSimpleLocation(origin),
+    destination: normalizeSimpleLocation(destination),
+    current_location: normalizeSimpleLocation(currentLocation),
     delivery: {
       out_for_delivery: state === "out_for_delivery",
       delivered: isDelivered
@@ -1506,15 +1567,30 @@ function buildEstesCarrierResponse(options){
     carrier_tracking_url: finalUrl,
     officialTrackingUrl: finalUrl,
     parsed: {
-      pro: row.pro || tracking,
+      pro: pro,
       status: status,
-      service: "",
-      handlingUnits: "",
-      shipmentWeight: "",
+      service: details.service || "Estes LTL Freight",
+      handlingUnits: details.pieces || "",
+      pieces: details.pieces || "",
+      shipmentWeight: details.weight || "",
       packagingType: "",
-      billOfLading: row.bol || "",
-      pickupDate: row.pickupDate || "",
-      estimatedDelivery: row.estimatedDelivery || "",
+      billOfLading: bol,
+      pickupDate: pickupDate,
+      shipDate: pickupDate,
+      estimatedDelivery: estimatedDelivery,
+      deliveryDate: deliveredDate,
+      transitDays: details.transitDays || "",
+      consigneeAddress: destination,
+      shipperAddress: origin,
+      driverName: details.driverName || "",
+      dim: details.dim || "",
+      purchaseOrderNumber: details.purchaseOrderNumber || "",
+      destinationServiceCenter: {
+        name: details.destinationServiceCenterName || "",
+        address: details.destinationServiceCenterAddress || "",
+        telephone: details.destinationServiceCenterTelephone || "",
+        email: details.destinationServiceCenterEmail || ""
+      },
       travelHistory: events.map(function(event){
         return {
           status: event.status,
@@ -1524,15 +1600,26 @@ function buildEstesCarrierResponse(options){
         };
       })
     },
-    billOfLading: row.bol || "",
-    bol: row.bol || "",
-    shipDate: row.pickupDate || "",
+    billOfLading: bol,
+    bol: bol,
+    shipDate: pickupDate,
+    pickupDate: pickupDate,
+    deliveryDate: deliveredDate,
+    transitDays: details.transitDays || "",
+    driverName: details.driverName || "",
+    dim: details.dim || "",
+    purchaseOrderNumber: details.purchaseOrderNumber || "",
+    destinationServiceCenterName: details.destinationServiceCenterName || "",
+    destinationServiceCenterAddress: details.destinationServiceCenterAddress || "",
+    destinationServiceCenterTelephone: details.destinationServiceCenterTelephone || "",
+    destinationServiceCenterEmail: details.destinationServiceCenterEmail || "",
     source: "Render Estes Express",
-    pageText: text.slice(0, 15000),
+    pageText: text.slice(0, 30000),
     debug: {
       title: options.title || "",
       url: finalUrl,
-      parsedRow: row
+      parsedRow: row,
+      expandedDetailsFound: !!details.hasExpandedDetails
     }
   };
 }
@@ -1576,6 +1663,163 @@ function parseEstesResultsRow(text, tracking){
   return result;
 }
 
+function parseEstesExpandedDetails(text, tracking){
+  const clean = String(text || "").replace(/\u00a0/g, " ");
+  const flat = clean.replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
+
+  const result = {
+    hasExpandedDetails: /Shipment Details|Shipment History|Delivery Details|Reference Numbers|Destination Service Center/i.test(clean),
+    pro: tracking,
+    status: "",
+    shipperAddress: "",
+    pickupDate: "",
+    pieces: "",
+    weight: "",
+    transitDays: "",
+    consigneeAddress: "",
+    appointmentDate: "",
+    appointmentStatus: "",
+    deliveryDate: "",
+    driverName: "",
+    bol: "",
+    dim: "",
+    purchaseOrderNumber: "",
+    destinationServiceCenterName: "",
+    destinationServiceCenterAddress: "",
+    destinationServiceCenterTelephone: "",
+    destinationServiceCenterEmail: "",
+    estimatedDelivery: "",
+    service: "Estes LTL Freight",
+    history: []
+  };
+
+  function val(label, endLabels){
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const end = endLabels && endLabels.length ? endLabels.map(function(item){
+      return item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }).join("|") : "Pickup Date|Pieces|Weight|Transit Days|Delivery Details|Reference Numbers|Destination Service Center|Shipment History|$";
+    const pattern = new RegExp(escaped + "\\s+(.+?)(?=\\s+(?:" + end + ")\\s+|$)", "i");
+    const match = flat.match(pattern);
+    return match && match[1] ? cleanTextValue(match[1]) : "";
+  }
+
+  result.shipperAddress = val("Shipper Address", ["Pickup Date"]);
+  result.pickupDate = val("Pickup Date", ["Pieces"]);
+  result.pieces = val("Pieces", ["Weight"]);
+  result.weight = val("Weight (lbs.)", ["Transit Days"]);
+  result.transitDays = val("Transit Days", ["Shipment History", "Delivery Details"]);
+  result.consigneeAddress = val("Consignee Address", ["Appointment Date"]);
+  result.appointmentDate = val("Appointment Date", ["Appointment Status"]);
+  result.appointmentStatus = val("Appointment Status", ["Delivery Date"]);
+  result.deliveryDate = val("Delivery Date", ["Driver Name"]);
+  result.driverName = val("Driver Name", ["Reference Numbers"]);
+  result.bol = val("Shipper Bill of Lading Number", ["DIM"]);
+  result.dim = val("DIM", ["Purchase Order Number"]);
+  result.purchaseOrderNumber = val("Purchase Order Number", ["Destination Service Center"]);
+  result.destinationServiceCenterName = val("Name", ["Address"]);
+  result.destinationServiceCenterAddress = val("Address", ["Telephone"]);
+  result.destinationServiceCenterTelephone = val("Telephone", ["Email"]);
+  result.destinationServiceCenterEmail = val("Email", ["Shipping", "Track", "Pickup Visibility", "Services", "Support", "$"]);
+
+  const row = parseEstesResultsRow(text, tracking);
+  if(row.bol && !result.bol) result.bol = row.bol;
+  if(row.pickupDate && !result.pickupDate) result.pickupDate = row.pickupDate;
+  if(row.estimatedDelivery && !result.estimatedDelivery) result.estimatedDelivery = row.estimatedDelivery;
+  if(row.status && !result.status) result.status = row.status;
+
+  if(/Delivery Completed\s*-\s*OK/i.test(flat)){
+    result.status = "Delivered";
+  } else if(!result.status && /Delivered/i.test(flat)){
+    result.status = "Delivered";
+  }
+
+  result.history = parseEstesShipmentHistory(clean);
+
+  return result;
+}
+
+function parseEstesShipmentHistory(text){
+  const events = [];
+  const clean = String(text || "").replace(/\u00a0/g, " ");
+  const start = clean.search(/Shipment History/i);
+  if(start < 0) return events;
+
+  let end = clean.search(/Delivery Details/i);
+  if(end < start) end = clean.search(/Reference Numbers/i);
+  if(end < start) end = clean.length;
+
+  const chunk = clean.slice(start, end);
+  const lines = chunk.split(/\n+/).map(function(line){
+    return cleanTextValue(line);
+  }).filter(Boolean);
+
+  let activeDate = "";
+
+  for(let i = 0; i < lines.length; i++){
+    const line = lines[i];
+
+    if(/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(line)){
+      activeDate = line;
+      continue;
+    }
+
+    if(/^\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}\s*(AM|PM)$/i.test(line)){
+      activeDate = line.split(/\s+/)[0];
+      continue;
+    }
+
+    const next = lines[i + 1] || "";
+    const timeMatch = next.match(/^(\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}\s*(AM|PM)|\d{1,2}:\d{2}\s*(AM|PM))$/i);
+
+    if(timeMatch){
+      const status = line;
+      const timestamp = next.indexOf("/") >= 0 ? next : activeDate ? activeDate + " " + next : next;
+
+      if(!/see more history|shipment history/i.test(status)){
+        events.push({
+          status: normalizeEstesHistoryStatus(status),
+          description: status,
+          location: normalizeSimpleLocation("Estes Express"),
+          timestamp: timestamp,
+          completed: true
+        });
+      }
+
+      i++;
+    }
+  }
+
+  if(!events.length){
+    const flat = chunk.replace(/\n+/g, " ").replace(/\s+/g, " ");
+    const regex = /(Delivery Completed\s*-\s*OK|Delivery in Progress\s*–?\s*Freight Given to Consignee for Unloading|Unload at Delivery Location|Arrived at Delivery Location|Out for Delivery)\s+(\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
+    let match;
+    while((match = regex.exec(flat)) !== null){
+      events.push({
+        status: normalizeEstesHistoryStatus(match[1]),
+        description: cleanTextValue(match[1]),
+        location: normalizeSimpleLocation("Estes Express"),
+        timestamp: cleanTextValue(match[2]),
+        completed: true
+      });
+    }
+  }
+
+  return events;
+}
+
+function normalizeEstesHistoryStatus(value){
+  const text = cleanTextValue(value);
+  const lower = text.toLowerCase();
+
+  if(lower.indexOf("delivery completed") >= 0) return "Delivered";
+  if(lower.indexOf("delivery in progress") >= 0) return "Delivery In Progress";
+  if(lower.indexOf("unload") >= 0) return "Unload At Delivery Location";
+  if(lower.indexOf("arrived") >= 0) return "Arrived At Delivery Location";
+  if(lower.indexOf("out for delivery") >= 0) return "Out For Delivery";
+
+  return text || "Carrier Update";
+}
+
 
 app.post("/track-estes", async function(req, res){
   const tracking = cleanTracking(req.body.tracking || req.query.tracking || req.body.pro || req.query.pro);
@@ -1587,7 +1831,7 @@ app.post("/track-estes", async function(req, res){
     });
   }
 
-  const result = await withTimeout(scrapeEstesTracking(tracking), 65000, "Estes Express tracking");
+  const result = await withTimeout(scrapeEstesTracking(tracking), 75000, "Estes Express tracking");
   return res.json(result);
 });
 
@@ -1601,7 +1845,7 @@ app.get("/track-estes", async function(req, res){
     });
   }
 
-  const result = await withTimeout(scrapeEstesTracking(tracking), 65000, "Estes Express tracking");
+  const result = await withTimeout(scrapeEstesTracking(tracking), 75000, "Estes Express tracking");
   return res.json(result);
 });
 
@@ -1738,7 +1982,7 @@ app.post("/track", async function(req, res){
   }
 
   if(carrier.indexOf("estes") >= 0){
-    const result = await withTimeout(scrapeEstesTracking(tracking), 65000, "Estes Express tracking");
+    const result = await withTimeout(scrapeEstesTracking(tracking), 75000, "Estes Express tracking");
     return res.json(result);
   }
 

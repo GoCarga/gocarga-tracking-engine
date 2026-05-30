@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.10",
+    version: "2.11",
     routes: ["/track-fedex", "/test-fedex", "/test-estes", "/test-tforce", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
@@ -435,7 +435,7 @@ function buildSimpleCarrierResponse(options){
     pro: tracking,
     status: status,
     state: state,
-    statusCopy: status,
+    statusCopy: row.signedBy && state === "delivered" ? "Signed by: " + row.signedBy : status,
     service: facts.service || "LTL Freight",
     handlingUnits: facts.handlingUnits || "",
     shipmentWeight: facts.shipmentWeight || "",
@@ -2266,7 +2266,7 @@ function buildTForceCarrierResponse(options){
     pro: row.pro || tracking,
     status: status,
     state: state,
-    statusCopy: status,
+    statusCopy: row.signedBy && state === "delivered" ? "Signed by: " + row.signedBy : status,
     service: row.service || "TForce Freight",
     handlingUnits: row.pieces || row.handlingUnits || "",
     pieces: row.pieces || "",
@@ -2275,7 +2275,7 @@ function buildTForceCarrierResponse(options){
     weight: row.weight || "",
     packagingType: row.packaging || "",
     eta: {
-      date: row.deliveryDate || row.estimatedDelivery || "",
+      date: row.deliveryDate && row.deliveredAt ? row.deliveryDate + " " + row.deliveredAt : row.deliveryDate || row.estimatedDelivery || "",
       time: row.deliveryDate ? "TForce delivery scan" : row.estimatedDelivery ? "TForce estimated delivery" : "",
       estimated: state !== "delivered"
     },
@@ -2301,6 +2301,8 @@ function buildTForceCarrierResponse(options){
       pickupDate: row.pickupDate || "",
       estimatedDelivery: row.estimatedDelivery || "",
       deliveryDate: row.deliveryDate || "",
+      deliveredAt: row.deliveredAt || "",
+      signedBy: row.signedBy || "",
       origin: row.origin || "",
       destination: row.destination || "",
       travelHistory: events.map(function(event){
@@ -2315,6 +2317,7 @@ function buildTForceCarrierResponse(options){
     billOfLading: row.bol || "",
     bol: row.bol || "",
     shipDate: row.pickupDate || "",
+    signedBy: row.signedBy || "",
     source: "Render TForce Freight",
     pageText: text.slice(0, 30000),
     debug: {
@@ -2345,8 +2348,8 @@ function firstMatch(text, patterns){
 
 
 function parseTForceText(text, tracking){
-  const flat = cleanTextValue(String(text || "").replace(/\n+/g, " "));
-  const lines = compactTrackingLines(text);
+  const clean = cleanTextValue(String(text || ""));
+  const block = getTForceResultBlock(clean, tracking);
   const result = {
     pro: tracking,
     status: "",
@@ -2359,119 +2362,195 @@ function parseTForceText(text, tracking){
     pickupDate: "",
     estimatedDelivery: "",
     deliveryDate: "",
+    deliveredAt: "",
+    signedBy: "",
     origin: "",
     destination: "",
     currentLocation: "",
+    shipFromName: "",
+    shipToName: "",
     events: []
   };
 
-  result.status = firstMatch(flat, [
-    /Status\s*:?\s*([A-Za-z ]+?)(?=\s+(?:PRO|Pickup|Delivery|Origin|Destination|Shipper|Consignee|Weight|Pieces|BOL|Reference|Service)|$)/i,
-    /Shipment Status\s*:?\s*([A-Za-z ]+?)(?=\s+(?:PRO|Pickup|Delivery|Origin|Destination|Shipper|Consignee|Weight|Pieces|BOL|Reference|Service)|$)/i,
-    /\b(Delivered|Out for Delivery|In Transit|Picked Up|Pickup|Appointment Pending|Exception)\b/i
-  ]);
-
-  result.pro = firstMatch(flat, [
+  result.pro = firstMatch(block, [
+    /PRO\(S\)\s+RELATED\s+TO\s+(\d{7,12})/i,
     /PRO\s*(?:Number|#)?\s*:?\s*(\d{7,12})/i,
     /Tracking\s*(?:Number|#)?\s*:?\s*(\d{7,12})/i
   ]) || tracking;
 
-  result.pickupDate = firstMatch(flat, [
+  result.status = getTForceStatusFromBlock(block);
+
+  result.deliveryDate = firstMatch(block, [
+    /Delivered\s+On\s*\n?\s*(\d{1,2}\/\d{1,2}\/\d{4})/i,
+    /Delivery\s*Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i
+  ]);
+
+  result.deliveredAt = firstMatch(block, [
+    /Delivered\s+At\s*\n?\s*(\d{1,2}:\d{2}\s*(?:AM|PM))/i
+  ]);
+
+  result.signedBy = firstMatch(block, [
+    /Signed\s+By\s*\n?\s*([A-Za-z0-9 .'-]+?)(?=\n|Service|Send Updates|Show Details|Ship To|$)/i
+  ]);
+
+  result.service = firstMatch(block, [
+    /Service\s*\n?\s*([A-Za-z0-9 \-/]+?)(?=\n|Send Updates|Show Details|Ship To|$)/i
+  ]) || "TForce Freight";
+
+  const shipTo = parseTForcePartyBlock(block, "Ship To", ["Ship From", "Tracking results provided", "Customize Your Tracking"]);
+  result.shipToName = shipTo.name;
+  result.destination = shipTo.location;
+
+  const shipFrom = parseTForcePartyBlock(block, "Ship From", ["Tracking results provided", "Customize Your Tracking", "Need Help"]);
+  result.shipFromName = shipFrom.name;
+  result.origin = shipFrom.location;
+
+  result.currentLocation = result.status.toLowerCase().indexOf("delivered") >= 0 ? result.destination : (result.origin || result.destination || "");
+
+  result.pickupDate = firstMatch(block, [
     /Pickup\s*Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i,
     /Ship\s*Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i
   ]);
 
-  result.estimatedDelivery = firstMatch(flat, [
+  result.estimatedDelivery = firstMatch(block, [
     /Estimated\s*Delivery\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i,
     /ETA\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i
   ]);
 
-  result.deliveryDate = firstMatch(flat, [
-    /Delivery\s*Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i,
-    /Delivered\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i
-  ]);
-
-  result.origin = cleanTForceLocation(firstMatch(flat, [
-    /Origin\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i,
-    /Shipper\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i
-  ]));
-
-  result.destination = cleanTForceLocation(firstMatch(flat, [
-    /Destination\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i,
-    /Consignee\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i
-  ]));
-
-  result.currentLocation = cleanTForceLocation(firstMatch(flat, [
-    /Current\s*Location\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i,
-    /Location\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i
-  ]));
-
-  result.pieces = firstMatch(flat, [
+  result.pieces = firstMatch(block, [
     /Pieces\s*:?\s*([0-9,]+)/i,
     /Total\s*Pieces\s*:?\s*([0-9,]+)/i,
     /Handling\s*Units\s*:?\s*([0-9,]+)/i
   ]);
 
-  result.handlingUnits = firstMatch(flat, [
+  result.handlingUnits = firstMatch(block, [
     /Handling\s*Units\s*:?\s*([0-9,]+)/i
   ]) || result.pieces;
 
-  result.weight = firstMatch(flat, [
+  result.weight = firstMatch(block, [
     /Weight\s*:?\s*([0-9,]+(?:\.[0-9]+)?\s*(?:lbs?|pounds?)?)/i,
     /Shipment\s*Weight\s*:?\s*([0-9,]+(?:\.[0-9]+)?\s*(?:lbs?|pounds?)?)/i
   ]);
 
-  result.bol = firstMatch(flat, [
+  result.bol = firstMatch(block, [
     /BOL\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i,
     /Bill\s*of\s*Lading\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i
   ]);
 
-  result.service = firstMatch(flat, [
-    /Service\s*:?\s*([A-Za-z0-9 \-/]+?)(?=\s+(?:Status|PRO|Pickup|Delivery|Origin|Destination|Weight|Pieces|BOL)|$)/i
-  ]);
-
-  result.events = parseTForceEvents(lines, result);
+  result.events = buildTForceCleanEvents(result);
 
   return result;
 }
 
-function parseTForceEvents(lines, result){
+function getTForceResultBlock(text, tracking){
+  const value = String(text || "");
+  const marker = "PRO(S) RELATED TO " + tracking;
+  let start = value.indexOf(marker);
+
+  if(start < 0){
+    start = value.indexOf(String(tracking || ""));
+  }
+
+  if(start < 0){
+    return value;
+  }
+
+  let end = value.indexOf("Customize Your Tracking With APIs", start);
+  if(end < 0) end = value.indexOf("Need Help?", start);
+  if(end < 0) end = value.indexOf("Website Terms of Use", start);
+  if(end < 0) end = Math.min(value.length, start + 4000);
+
+  return value.slice(start, end);
+}
+
+function getTForceStatusFromBlock(block){
+  const value = String(block || "");
+  const lines = compactTrackingLines(value);
+  const validStatuses = ["Delivered", "Out for Delivery", "In Transit", "Picked Up", "Exception", "Appointment Pending"];
+
+  for(const status of validStatuses){
+    if(lines.some(function(line){ return line.trim().toLowerCase() === status.toLowerCase(); })){
+      return status;
+    }
+  }
+
+  if(/SHIPMENT HAS BEEN DELIVERED TO THE CONSIGNEE/i.test(value)){
+    return "Delivered";
+  }
+
+  return firstMatch(value, [
+    /\b(Delivered|Out for Delivery|In Transit|Picked Up|Exception|Appointment Pending)\b/i
+  ]) || "Tracking Found";
+}
+
+function parseTForcePartyBlock(block, label, endLabels){
+  const result = {
+    name: "",
+    location: ""
+  };
+
+  const value = String(block || "");
+  const startRegex = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\n?", "i");
+  const startMatch = value.match(startRegex);
+
+  if(!startMatch || startMatch.index === undefined){
+    return result;
+  }
+
+  const start = startMatch.index + startMatch[0].length;
+  let end = value.length;
+
+  for(const endLabel of endLabels){
+    const idx = value.search(new RegExp(endLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+    if(idx > start && idx < end){
+      end = idx;
+    }
+  }
+
+  const lines = value.slice(start, end).split(/\n+/).map(function(line){
+    return cleanTextValue(line);
+  }).filter(Boolean);
+
+  if(lines.length){
+    result.name = lines[0] || "";
+  }
+
+  const locationLine = lines.find(function(line){
+    return /^[A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?(?:\s+US| USA)?$/i.test(line);
+  });
+
+  if(locationLine){
+    result.location = cleanTForceLocation(locationLine);
+  } else if(lines.length >= 2){
+    result.location = cleanTForceLocation(lines[1]);
+  }
+
+  return result;
+}
+
+function buildTForceCleanEvents(row){
   const events = [];
-  const eventWords = [
-    "Delivered",
-    "Out for Delivery",
-    "In Transit",
-    "Picked Up",
-    "Pickup",
-    "Arrived",
-    "Departed",
-    "Exception",
-    "Appointment"
-  ];
 
-  for(let i = 0; i < lines.length; i++){
-    const line = lines[i];
-    const found = eventWords.find(function(word){
-      return line.toLowerCase().indexOf(word.toLowerCase()) >= 0;
-    });
-
-    if(!found) continue;
-
-    const windowLines = lines.slice(Math.max(0, i - 3), Math.min(lines.length, i + 6));
-    const windowText = windowLines.join(" ");
-    const time = firstMatch(windowText, [
-      /(\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))/i,
-      /(\d{1,2}\/\d{1,2}\/\d{2,4})/i
-    ]);
-    const location = cleanTForceLocation(windowLines.find(function(item){
-      return /^[A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?$/i.test(item);
-    }) || result.currentLocation || result.destination || result.origin || "TForce Freight");
+  if(String(row.status || "").toLowerCase().indexOf("delivered") >= 0){
+    const timestamp = row.deliveryDate && row.deliveredAt ? row.deliveryDate + " " + row.deliveredAt : row.deliveryDate || "Carrier update";
 
     events.push({
-      status: normalizeTForceStatus(found),
-      description: line,
-      location: normalizeSimpleLocation(location),
-      timestamp: time || "Carrier update",
+      status: "Delivered",
+      description: row.signedBy ? "Signed by: " + row.signedBy : "Shipment delivered",
+      location: normalizeSimpleLocation(row.destination || "TForce Freight"),
+      timestamp: timestamp,
+      completed: true
+    });
+
+    return events;
+  }
+
+  if(row.status){
+    events.push({
+      status: normalizeTForceStatus(row.status),
+      description: row.status,
+      location: normalizeSimpleLocation(row.currentLocation || row.destination || row.origin || "TForce Freight"),
+      timestamp: row.estimatedDelivery || row.pickupDate || "Carrier update",
       completed: true
     });
   }

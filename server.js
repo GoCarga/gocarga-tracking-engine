@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.6",
+    version: "2.7",
     routes: ["/track-fedex", "/test-fedex", "/test-estes", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
@@ -1504,7 +1504,12 @@ function buildEstesCarrierResponse(options){
   const pickupDate = details.pickupDate || row.pickupDate || "";
   const estimatedDelivery = details.estimatedDelivery || row.estimatedDelivery || "";
   const deliveredDate = details.deliveryDate || "";
-  const status = normalizeSimpleStatus(details.status || row.status || "Tracking Found");
+  let status = cleanEstesTableStatus(details.status || row.status || "Tracking Found");
+
+  if(/delivery completed\s*-\s*ok/i.test(details.deliveryCompletedText || "")){
+    status = "Delivered";
+  }
+
   const state = normalizeSimpleState(status);
   const isDelivered = state === "delivered";
 
@@ -1639,29 +1644,96 @@ function parseEstesResultsRow(text, tracking){
     return result;
   }
 
-  const rowText = clean.slice(index, index + 500).replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
+  const rowText = clean.slice(index, index + 700).replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
 
-  const match = rowText.match(/(\d{7,12})\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{4,20})(?:\s+(\d{1,2}\/\d{1,2}\/\d{4}))?\s+([A-Za-z ]+?)(?:\s+Shipping|\s+Track|\s+Pickup Visibility|\s+Services|\s+Support|$)/i);
+  const statusStop = "(?:Picked Up|In Transit|Out for Delivery|Delivered\\s+Delivery Completed|Delivery Completed|Shipment Details|Shipping|Track|Pickup Visibility|Services|Support|$)";
 
-  if(match){
-    result.pro = cleanTextValue(match[1]);
-    result.pickupDate = cleanTextValue(match[2]);
-    result.bol = cleanTextValue(match[3]);
-    result.estimatedDelivery = cleanTextValue(match[4] || "");
-    result.status = cleanTextValue(match[5] || "");
+  const rangeMatch = rowText.match(new RegExp(
+    "(\\d{7,12})\\s+" +
+    "(\\d{1,2}\\/\\d{1,2}\\/\\d{4})\\s+" +
+    "(\\d{4,20})\\s+" +
+    "(\\d{1,2}\\/\\d{1,2}\\/\\d{4}\\s*[–\\-]\\s*\\d{1,2}\\/\\d{1,2}\\/\\d{4})\\s+" +
+    "([A-Za-z ]+?)\\s*(?=" + statusStop + ")",
+    "i"
+  ));
+
+  if(rangeMatch){
+    result.pro = cleanTextValue(rangeMatch[1]);
+    result.pickupDate = cleanTextValue(rangeMatch[2]);
+    result.bol = cleanTextValue(rangeMatch[3]);
+    result.estimatedDelivery = cleanTextValue(rangeMatch[4]);
+    result.status = cleanEstesTableStatus(rangeMatch[5]);
     return result;
   }
 
-  const simpler = rowText.match(/(\d{7,12})\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{4,20})\s+([A-Za-z ]+)/i);
-  if(simpler){
-    result.pro = cleanTextValue(simpler[1]);
-    result.pickupDate = cleanTextValue(simpler[2]);
-    result.bol = cleanTextValue(simpler[3]);
-    result.status = cleanTextValue(simpler[4]).replace(/\s+Shipping.*$/i, "").trim();
+  const exactMatch = rowText.match(new RegExp(
+    "(\\d{7,12})\\s+" +
+    "(\\d{1,2}\\/\\d{1,2}\\/\\d{4})\\s+" +
+    "(\\d{4,20})" +
+    "(?:\\s+(\\d{1,2}\\/\\d{1,2}\\/\\d{4}))?\\s+" +
+    "([A-Za-z ]+?)\\s*(?=" + statusStop + ")",
+    "i"
+  ));
+
+  if(exactMatch){
+    result.pro = cleanTextValue(exactMatch[1]);
+    result.pickupDate = cleanTextValue(exactMatch[2]);
+    result.bol = cleanTextValue(exactMatch[3]);
+    result.estimatedDelivery = cleanTextValue(exactMatch[4] || "");
+    result.status = cleanEstesTableStatus(exactMatch[5]);
+    return result;
+  }
+
+  const simple = rowText.match(/(\d{7,12})\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{4,20})/i);
+  if(simple){
+    result.pro = cleanTextValue(simple[1]);
+    result.pickupDate = cleanTextValue(simple[2]);
+    result.bol = cleanTextValue(simple[3]);
+
+    const afterBol = rowText.slice(rowText.indexOf(simple[3]) + simple[3].length);
+    const validStatuses = ["Delivered", "Out for Delivery", "In Transit", "Picked Up", "Appointment Pending", "Appointment Required"];
+    for(const status of validStatuses){
+      const statusRegex = new RegExp("\\b" + status.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
+      const statusMatch = afterBol.match(statusRegex);
+      if(statusMatch){
+        const beforeStatus = afterBol.slice(0, statusMatch.index).trim();
+        const range = beforeStatus.match(/(\d{1,2}\/\d{1,2}\/\d{4}\s*[–\-]\s*\d{1,2}\/\d{1,2}\/\d{4}|\d{1,2}\/\d{1,2}\/\d{4})/);
+        if(range){
+          result.estimatedDelivery = cleanTextValue(range[1]);
+        }
+        result.status = status;
+        break;
+      }
+    }
   }
 
   return result;
 }
+
+function cleanEstesTableStatus(value){
+  let text = cleanTextValue(value);
+  text = text.replace(/\bPicked Up\b.*$/i, "").trim();
+  text = text.replace(/\bIn Transit\b.*$/i, "").trim();
+  text = text.replace(/\bOut for Delivery\b.*$/i, "").trim();
+  text = text.replace(/\bDelivered Delivery Completed.*$/i, "Delivered").trim();
+  text = text.replace(/\bShipment Details\b.*$/i, "").trim();
+
+  if(/^delivered$/i.test(text)) return "Delivered";
+  if(/^out for delivery$/i.test(text)) return "Out for Delivery";
+  if(/^in transit$/i.test(text)) return "In Transit";
+  if(/^picked up$/i.test(text)) return "Picked Up";
+
+  return text;
+}
+
+
+
+function cleanEstesDateTime(value){
+  const text = cleanTextValue(value);
+  const match = text.match(/\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?/i);
+  return match ? cleanTextValue(match[0]) : text;
+}
+
 
 function parseEstesExpandedDetails(text, tracking){
   const clean = String(text || "").replace(/\u00a0/g, " ");
@@ -1704,22 +1776,23 @@ function parseEstesExpandedDetails(text, tracking){
   }
 
   result.shipperAddress = val("Shipper Address", ["Pickup Date"]);
-  result.pickupDate = val("Pickup Date", ["Pieces"]);
+  result.pickupDate = cleanEstesDateTime(val("Pickup Date", ["Pieces"]));
   result.pieces = val("Pieces", ["Weight"]);
   result.weight = val("Weight (lbs.)", ["Transit Days"]);
   result.transitDays = val("Transit Days", ["Shipment History", "Delivery Details"]);
   result.consigneeAddress = val("Consignee Address", ["Appointment Date"]);
   result.appointmentDate = val("Appointment Date", ["Appointment Status"]);
   result.appointmentStatus = val("Appointment Status", ["Delivery Date"]);
-  result.deliveryDate = val("Delivery Date", ["Driver Name"]);
+  result.deliveryDate = cleanEstesDateTime(val("Delivery Date", ["Driver Name"]));
   result.driverName = val("Driver Name", ["Reference Numbers"]);
   result.bol = val("Shipper Bill of Lading Number", ["DIM"]);
   result.dim = val("DIM", ["Purchase Order Number"]);
   result.purchaseOrderNumber = val("Purchase Order Number", ["Destination Service Center"]);
-  result.destinationServiceCenterName = val("Name", ["Address"]);
-  result.destinationServiceCenterAddress = val("Address", ["Telephone"]);
-  result.destinationServiceCenterTelephone = val("Telephone", ["Email"]);
-  result.destinationServiceCenterEmail = val("Email", ["Shipping", "Track", "Pickup Visibility", "Services", "Support", "$"]);
+  const serviceCenter = parseEstesServiceCenter(clean);
+  result.destinationServiceCenterName = serviceCenter.name || val("Name", ["Address"]);
+  result.destinationServiceCenterAddress = serviceCenter.address || val("Address", ["Telephone"]);
+  result.destinationServiceCenterTelephone = serviceCenter.telephone || val("Telephone", ["Email"]);
+  result.destinationServiceCenterEmail = serviceCenter.email || val("Email", ["Shipping", "Track", "Pickup Visibility", "Services", "Support", "$"]);
 
   const row = parseEstesResultsRow(text, tracking);
   if(row.bol && !result.bol) result.bol = row.bol;
@@ -1727,16 +1800,62 @@ function parseEstesExpandedDetails(text, tracking){
   if(row.estimatedDelivery && !result.estimatedDelivery) result.estimatedDelivery = row.estimatedDelivery;
   if(row.status && !result.status) result.status = row.status;
 
+  result.deliveryCompletedText = "";
   if(/Delivery Completed\s*-\s*OK/i.test(flat)){
-    result.status = "Delivered";
-  } else if(!result.status && /Delivered/i.test(flat)){
-    result.status = "Delivered";
+    result.deliveryCompletedText = "Delivery Completed - OK";
   }
 
   result.history = parseEstesShipmentHistory(clean);
 
   return result;
 }
+
+
+function parseEstesServiceCenter(text){
+  const result = {
+    name: "",
+    address: "",
+    telephone: "",
+    email: ""
+  };
+
+  const start = String(text || "").search(/Destination Service Center/i);
+  if(start < 0) return result;
+
+  const chunk = String(text || "").slice(start, start + 1200);
+  const lines = chunk.split(/\n+/).map(function(line){
+    return cleanTextValue(line);
+  }).filter(Boolean);
+
+  for(let i = 0; i < lines.length; i++){
+    const line = lines[i];
+
+    if(/^Name\b/i.test(line)){
+      result.name = cleanTextValue(line.replace(/^Name\s*/i, ""));
+      if(!result.name && lines[i + 1]) result.name = lines[i + 1];
+    }
+
+    if(/^Address\b/i.test(line)){
+      result.address = cleanTextValue(line.replace(/^Address\s*/i, ""));
+      if(!result.address && lines[i + 1]) result.address = lines[i + 1];
+    }
+
+    if(/^Telephone\b/i.test(line)){
+      result.telephone = cleanTextValue(line.replace(/^Telephone\s*/i, ""));
+      if(!result.telephone && lines[i + 1]) result.telephone = lines[i + 1];
+    }
+
+    if(/^Email\b/i.test(line)){
+      result.email = cleanTextValue(line.replace(/^Email\s*/i, ""));
+      if(!result.email && lines[i + 1]) result.email = lines[i + 1];
+    }
+  }
+
+  result.email = result.email.replace(/\s+Additional Information.*$/i, "").trim();
+
+  return result;
+}
+
 
 function parseEstesShipmentHistory(text){
   const events = [];

@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.7",
+    version: "2.8",
     routes: ["/track-fedex", "/test-fedex", "/test-estes", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
@@ -1775,14 +1775,15 @@ function parseEstesExpandedDetails(text, tracking){
     return match && match[1] ? cleanTextValue(match[1]) : "";
   }
 
-  result.shipperAddress = val("Shipper Address", ["Pickup Date"]);
+  result.shipperAddress = cleanEstesAddress(val("Shipper Address", ["Pickup Date"]));
   result.pickupDate = cleanEstesDateTime(val("Pickup Date", ["Pieces"]));
   result.pieces = val("Pieces", ["Weight"]);
   result.weight = val("Weight (lbs.)", ["Transit Days"]);
   result.transitDays = val("Transit Days", ["Shipment History", "Delivery Details"]);
-  result.consigneeAddress = val("Consignee Address", ["Appointment Date"]);
-  result.appointmentDate = val("Appointment Date", ["Appointment Status"]);
-  result.appointmentStatus = val("Appointment Status", ["Delivery Date"]);
+  result.consigneeAddress = cleanEstesAddress(val("Consignee Address", ["Estimated Delivery Date", "Appointment Date", "Delivery Date", "Driver Name", "Reference Numbers"]));
+  result.estimatedDelivery = cleanEstesDateRange(val("Estimated Delivery Date", ["Appointment Date", "Delivery Date", "Driver Name", "Reference Numbers"]));
+  result.appointmentDate = cleanEstesDateTime(val("Appointment Date", ["Appointment Status"]));
+  result.appointmentStatus = cleanTextValue(val("Appointment Status", ["Delivery Date", "Driver Name", "Reference Numbers"]));
   result.deliveryDate = cleanEstesDateTime(val("Delivery Date", ["Driver Name"]));
   result.driverName = val("Driver Name", ["Reference Numbers"]);
   result.bol = val("Shipper Bill of Lading Number", ["DIM"]);
@@ -1793,6 +1794,12 @@ function parseEstesExpandedDetails(text, tracking){
   result.destinationServiceCenterAddress = serviceCenter.address || val("Address", ["Telephone"]);
   result.destinationServiceCenterTelephone = serviceCenter.telephone || val("Telephone", ["Email"]);
   result.destinationServiceCenterEmail = serviceCenter.email || val("Email", ["Shipping", "Track", "Pickup Visibility", "Services", "Support", "$"]);
+
+  result.shipperAddress = cleanEstesAddress(result.shipperAddress);
+  result.consigneeAddress = cleanEstesAddress(result.consigneeAddress);
+  result.destinationServiceCenterName = cleanEstesServiceCenterName(result.destinationServiceCenterName);
+  result.destinationServiceCenterAddress = cleanEstesAddress(result.destinationServiceCenterAddress);
+  result.destinationServiceCenterEmail = result.destinationServiceCenterEmail.replace(/\s+Additional Information.*$/i, "").trim();
 
   const row = parseEstesResultsRow(text, tracking);
   if(row.bol && !result.bol) result.bol = row.bol;
@@ -1811,6 +1818,42 @@ function parseEstesExpandedDetails(text, tracking){
 }
 
 
+
+function cleanEstesAddress(value){
+  let text = cleanTextValue(value);
+  text = text.replace(/\s+Estimated Delivery Date\s+.*$/i, "");
+  text = text.replace(/\s+Appointment Date\s+.*$/i, "");
+  text = text.replace(/\s+Appointment Status\s+.*$/i, "");
+  text = text.replace(/\s+Delivery Date\s+.*$/i, "");
+  text = text.replace(/\s+Driver Name\s+.*$/i, "");
+  text = text.replace(/\s+Reference Numbers\s+.*$/i, "");
+  text = text.replace(/\s+Destination Service Center\s+.*$/i, "");
+  text = text.replace(/\s+Telephone\s+.*$/i, "");
+  text = text.replace(/\s+Email\s+.*$/i, "");
+  text = text.replace(/\s+Additional Information\s+.*$/i, "");
+  text = text.replace(/\s+Shipping\s+Track\s+.*$/i, "");
+  return cleanTextValue(text);
+}
+
+function cleanEstesDateRange(value){
+  const text = cleanTextValue(value);
+  const range = text.match(/\d{1,2}\/\d{1,2}\/\d{4}\s*[–-]\s*\d{1,2}\/\d{1,2}\/\d{4}/);
+  if(range) return cleanTextValue(range[0]);
+
+  const single = text.match(/\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?/i);
+  return single ? cleanTextValue(single[0]) : text;
+}
+
+function cleanEstesServiceCenterName(value){
+  let text = cleanTextValue(value);
+  text = text.replace(/^Destination Service Center\s*/i, "");
+  text = text.replace(/^Name\s*/i, "");
+  text = text.replace(/\s+Address\s+.*$/i, "");
+  text = text.replace(/\s+Telephone\s+.*$/i, "");
+  text = text.replace(/\s+Email\s+.*$/i, "");
+  return cleanTextValue(text);
+}
+
 function parseEstesServiceCenter(text){
   const result = {
     name: "",
@@ -1822,7 +1865,12 @@ function parseEstesServiceCenter(text){
   const start = String(text || "").search(/Destination Service Center/i);
   if(start < 0) return result;
 
-  const chunk = String(text || "").slice(start, start + 1200);
+  let chunk = String(text || "").slice(start, start + 1500);
+  const end = chunk.search(/Additional Information|Questions\?|Need a delivery receipt|Shipping\s+Track|Pickup Visibility|Services\s+Support/i);
+  if(end > 0){
+    chunk = chunk.slice(0, end);
+  }
+
   const lines = chunk.split(/\n+/).map(function(line){
     return cleanTextValue(line);
   }).filter(Boolean);
@@ -1832,25 +1880,27 @@ function parseEstesServiceCenter(text){
 
     if(/^Name\b/i.test(line)){
       result.name = cleanTextValue(line.replace(/^Name\s*/i, ""));
-      if(!result.name && lines[i + 1]) result.name = lines[i + 1];
+      if(!result.name && lines[i + 1]) result.name = cleanTextValue(lines[i + 1]);
     }
 
     if(/^Address\b/i.test(line)){
       result.address = cleanTextValue(line.replace(/^Address\s*/i, ""));
-      if(!result.address && lines[i + 1]) result.address = lines[i + 1];
+      if(!result.address && lines[i + 1]) result.address = cleanTextValue(lines[i + 1]);
     }
 
     if(/^Telephone\b/i.test(line)){
       result.telephone = cleanTextValue(line.replace(/^Telephone\s*/i, ""));
-      if(!result.telephone && lines[i + 1]) result.telephone = lines[i + 1];
+      if(!result.telephone && lines[i + 1]) result.telephone = cleanTextValue(lines[i + 1]);
     }
 
     if(/^Email\b/i.test(line)){
       result.email = cleanTextValue(line.replace(/^Email\s*/i, ""));
-      if(!result.email && lines[i + 1]) result.email = lines[i + 1];
+      if(!result.email && lines[i + 1]) result.email = cleanTextValue(lines[i + 1]);
     }
   }
 
+  result.name = cleanEstesServiceCenterName(result.name);
+  result.address = cleanEstesAddress(result.address);
   result.email = result.email.replace(/\s+Additional Information.*$/i, "").trim();
 
   return result;

@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.11",
+    version: "2.13",
     routes: ["/track-fedex", "/test-fedex", "/test-estes", "/test-tforce", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
@@ -2110,6 +2110,113 @@ app.get("/track-dayton", async function(req, res){
 });
 
 
+
+async function readReliableBodyText(page){
+  let text = "";
+
+  try {
+    text = await page.locator("body").innerText({ timeout: 8000 });
+  } catch(error){}
+
+  if(!text || cleanTextValue(text).length < 50){
+    try {
+      text = await page.evaluate(function(){
+        return document.body ? document.body.innerText || document.body.textContent || "" : "";
+      });
+    } catch(error){}
+  }
+
+  return cleanTextValue(text);
+}
+
+async function waitForTForceResults(page, tracking){
+  const expected = "PRO(S) RELATED TO " + tracking;
+
+  try {
+    await page.waitForFunction(function(expectedText){
+      return document.body && document.body.innerText && document.body.innerText.indexOf(expectedText) >= 0;
+    }, expected, { timeout: 35000 });
+    return true;
+  } catch(error){}
+
+  try {
+    await page.waitForFunction(function(pro){
+      const text = document.body && document.body.innerText ? document.body.innerText : "";
+      return text.indexOf(pro) >= 0 && (
+        text.indexOf("Delivered On") >= 0 ||
+        text.indexOf("Ship To") >= 0 ||
+        text.indexOf("Ship From") >= 0 ||
+        text.indexOf("Signed By") >= 0
+      );
+    }, tracking, { timeout: 15000 });
+    return true;
+  } catch(error){}
+
+  return false;
+}
+
+
+async function expandTForceDetails(page){
+  const selectors = [
+    "button:has-text('Show Details')",
+    "a:has-text('Show Details')",
+    "[role='button']:has-text('Show Details')",
+    "button:has-text('Details')",
+    "a:has-text('Details')",
+    "[aria-label*='Show Details']",
+    "[aria-label*='Details']",
+    "button"
+  ];
+
+  for(const selector of selectors){
+    try{
+      const items = await page.locator(selector).all();
+
+      for(const item of items.slice(0, 12)){
+        try{
+          const text = cleanTextValue(await item.innerText({ timeout: 500 }).catch(function(){ return ""; }));
+          const label = await item.getAttribute("aria-label").catch(function(){ return ""; });
+          const combined = (text + " " + (label || "")).trim();
+
+          if(/show details|details|\+/i.test(combined)){
+            if(await item.isVisible({ timeout: 800 })){
+              await item.click({ force: true, timeout: 2500 }).catch(async function(){
+                await item.evaluate(function(el){ el.click(); }).catch(function(){});
+              });
+              await page.waitForTimeout(3500);
+              return true;
+            }
+          }
+        } catch(error){}
+      }
+    } catch(error){}
+  }
+
+  try{
+    const clicked = await page.evaluate(function(){
+      const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], div, span"));
+      const item = candidates.find(function(el){
+        const text = (el.innerText || el.textContent || el.getAttribute("aria-label") || "").trim();
+        return /show details|details \+|show details \+/i.test(text);
+      });
+
+      if(item){
+        item.click();
+        return true;
+      }
+
+      return false;
+    });
+
+    if(clicked){
+      await page.waitForTimeout(3500);
+      return true;
+    }
+  } catch(error){}
+
+  return false;
+}
+
 async function scrapeTForceTracking(tracking){
   tracking = cleanTracking(tracking);
   let browser;
@@ -2135,15 +2242,21 @@ async function scrapeTForceTracking(tracking){
     });
 
     await clickPossibleCookieButtons(page);
-    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(function(){});
-    await page.waitForTimeout(8000);
+    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(function(){});
+    await waitForTForceResults(page, tracking);
+    await page.waitForTimeout(2000);
+    await expandTForceDetails(page);
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(function(){});
+    await page.waitForTimeout(3000);
 
     let report = await getPageReport(page);
     let bodyText = report && report.bodyText ? report.bodyText : "";
+    bodyText = bodyText && cleanTextValue(bodyText).length > 50 ? bodyText : await readReliableBodyText(page);
     let finalUrl = page.url();
 
     if(!tforcePageHasResult(bodyText, tracking)){
-      const filled = await setInputValue(page, [
+      await setInputValue(page, [
+        "textarea",
         "input[placeholder*='PRO']",
         "input[placeholder*='pro']",
         "input[placeholder*='Tracking']",
@@ -2154,7 +2267,6 @@ async function scrapeTForceTracking(tracking){
         "input[id*='pro']",
         "input[type='search']",
         "input[type='text']",
-        "textarea",
         "input"
       ], tracking);
 
@@ -2175,11 +2287,16 @@ async function scrapeTForceTracking(tracking){
         await page.keyboard.press("Enter").catch(function(){});
       }
 
-      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(function(){});
-      await page.waitForTimeout(12000);
+      await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(function(){});
+      await waitForTForceResults(page, tracking);
+      await page.waitForTimeout(2000);
+      await expandTForceDetails(page);
+      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(function(){});
+      await page.waitForTimeout(4000);
 
       report = await getPageReport(page);
       bodyText = report && report.bodyText ? report.bodyText : "";
+      bodyText = bodyText && cleanTextValue(bodyText).length > 50 ? bodyText : await readReliableBodyText(page);
       finalUrl = page.url();
     }
 
@@ -2215,16 +2332,15 @@ function tforcePageHasResult(text, tracking){
   const body = String(text || "").toLowerCase();
   const cleanPro = String(tracking || "").toLowerCase();
 
-  if(body.indexOf(cleanPro) < 0) return false;
+  if(!body || body.indexOf(cleanPro) < 0) return false;
 
-  return body.indexOf("delivered") >= 0 ||
-    body.indexOf("in transit") >= 0 ||
-    body.indexOf("out for delivery") >= 0 ||
-    body.indexOf("pickup") >= 0 ||
-    body.indexOf("shipment") >= 0 ||
-    body.indexOf("pro number") >= 0 ||
-    body.indexOf("consignee") >= 0 ||
-    body.indexOf("shipper") >= 0;
+  return body.indexOf("pro(s) related to") >= 0 ||
+    body.indexOf("delivered on") >= 0 ||
+    body.indexOf("signed by") >= 0 ||
+    body.indexOf("ship to") >= 0 ||
+    body.indexOf("ship from") >= 0 ||
+    body.indexOf("shipment has been delivered") >= 0 ||
+    body.indexOf("tracking results provided by tforce") >= 0;
 }
 
 function buildTForceCarrierResponse(options){
@@ -2248,6 +2364,7 @@ function buildTForceCarrierResponse(options){
   const row = parseTForceText(text, tracking);
   const status = row.status || (notFound ? "Not Found" : "Tracking Found");
   const state = normalizeSimpleState(status);
+  const hasParsedTForceDetails = !!(row.status && (row.deliveryDate || row.signedBy || row.origin || row.destination));
   const events = row.events.length ? row.events : [{
     status: status,
     description: status,
@@ -2257,10 +2374,10 @@ function buildTForceCarrierResponse(options){
   }];
 
   return {
-    success: !blocked && !notFound && tforcePageHasResult(text, tracking),
-    found: !blocked && !notFound && tforcePageHasResult(text, tracking),
+    success: !blocked && !notFound && (tforcePageHasResult(text, tracking) || hasParsedTForceDetails),
+    found: !blocked && !notFound && (tforcePageHasResult(text, tracking) || hasParsedTForceDetails),
     blocked: blocked,
-    reason: blocked ? "CAPTCHA_OR_ACCESS_BLOCK" : notFound ? "NOT_FOUND" : tforcePageHasResult(text, tracking) ? "" : "TFORCE_DETAILS_NOT_RETURNED",
+    reason: blocked ? "CAPTCHA_OR_ACCESS_BLOCK" : notFound ? "NOT_FOUND" : (tforcePageHasResult(text, tracking) || hasParsedTForceDetails) ? "" : "TFORCE_DETAILS_NOT_RETURNED",
     carrier: "TForce Freight",
     tracking: tracking,
     pro: row.pro || tracking,
@@ -2298,6 +2415,9 @@ function buildTForceCarrierResponse(options){
       shipmentWeight: row.weight || "",
       packagingType: row.packaging || "",
       billOfLading: row.bol || "",
+      referenceNumber: row.referenceNumber || "",
+      purchaseOrderNumber: row.purchaseOrderNumber || "",
+      terminal: row.terminal || "",
       pickupDate: row.pickupDate || "",
       estimatedDelivery: row.estimatedDelivery || "",
       deliveryDate: row.deliveryDate || "",
@@ -2315,7 +2435,13 @@ function buildTForceCarrierResponse(options){
       })
     },
     billOfLading: row.bol || "",
+      referenceNumber: row.referenceNumber || "",
+      purchaseOrderNumber: row.purchaseOrderNumber || "",
+      terminal: row.terminal || "",
     bol: row.bol || "",
+    referenceNumber: row.referenceNumber || "",
+    purchaseOrderNumber: row.purchaseOrderNumber || "",
+    terminal: row.terminal || "",
     shipDate: row.pickupDate || "",
     signedBy: row.signedBy || "",
     source: "Render TForce Freight",
@@ -2437,6 +2563,16 @@ function parseTForceText(text, tracking){
     /Bill\s*of\s*Lading\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i
   ]);
 
+  const expanded = parseTForceExpandedDetails(block);
+  result.pieces = result.pieces || expanded.pieces || "";
+  result.handlingUnits = result.handlingUnits || expanded.handlingUnits || result.pieces || "";
+  result.weight = result.weight || expanded.weight || "";
+  result.bol = result.bol || expanded.bol || "";
+  result.pickupDate = result.pickupDate || expanded.pickupDate || expanded.shipDate || "";
+  result.referenceNumber = expanded.referenceNumber || "";
+  result.purchaseOrderNumber = expanded.purchaseOrderNumber || "";
+  result.terminal = expanded.terminal || "";
+
   result.events = buildTForceCleanEvents(result);
 
   return result;
@@ -2557,6 +2693,74 @@ function buildTForceCleanEvents(row){
 
   return events;
 }
+
+
+function parseTForceExpandedDetails(block){
+  const result = {
+    pieces: "",
+    handlingUnits: "",
+    weight: "",
+    bol: "",
+    pickupDate: "",
+    shipDate: "",
+    referenceNumber: "",
+    purchaseOrderNumber: "",
+    consignee: "",
+    shipper: "",
+    terminal: ""
+  };
+
+  const value = cleanTextValue(String(block || ""));
+  const flat = value.replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
+
+  result.pieces = firstMatch(flat, [
+    /Pieces\s*:?\s*([0-9,]+)/i,
+    /Total\s*Pieces\s*:?\s*([0-9,]+)/i,
+    /Piece\s*Count\s*:?\s*([0-9,]+)/i
+  ]);
+
+  result.handlingUnits = firstMatch(flat, [
+    /Handling\s*Units\s*:?\s*([0-9,]+)/i,
+    /HU\s*:?\s*([0-9,]+)/i
+  ]) || result.pieces;
+
+  result.weight = firstMatch(flat, [
+    /Shipment\s*Weight\s*:?\s*([0-9,]+(?:\.[0-9]+)?\s*(?:lbs?|pounds?)?)/i,
+    /Weight\s*:?\s*([0-9,]+(?:\.[0-9]+)?\s*(?:lbs?|pounds?)?)/i,
+    /Total\s*Weight\s*:?\s*([0-9,]+(?:\.[0-9]+)?\s*(?:lbs?|pounds?)?)/i
+  ]);
+
+  result.bol = firstMatch(flat, [
+    /BOL\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i,
+    /Bill\s*of\s*Lading\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i
+  ]);
+
+  result.pickupDate = firstMatch(flat, [
+    /Pickup\s*Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i,
+    /Picked\s*Up\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i
+  ]);
+
+  result.shipDate = firstMatch(flat, [
+    /Ship\s*Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i
+  ]) || result.pickupDate;
+
+  result.referenceNumber = firstMatch(flat, [
+    /Reference\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i
+  ]);
+
+  result.purchaseOrderNumber = firstMatch(flat, [
+    /Purchase\s*Order\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i,
+    /PO\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i
+  ]);
+
+  result.terminal = firstMatch(flat, [
+    /Terminal\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i,
+    /Service\s*Center\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i
+  ]);
+
+  return result;
+}
+
 
 function normalizeTForceStatus(value){
   const lower = String(value || "").toLowerCase();

@@ -14,8 +14,8 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.2",
-    routes: ["/track-fedex", "/test-fedex", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
+    version: "2.3",
+    routes: ["/track-fedex", "/test-fedex", "/test-estes", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
 
@@ -29,6 +29,21 @@ app.get("/test-fedex", function(req, res){
     message: "FedEx route file is live. This does not scrape FedEx.",
     tracking: tracking,
     officialFedExUrl: "https://www.fedexfreight.com/fedextrack/?trknbr=" + encodeURIComponent(tracking) + "&trkqual=~" + encodeURIComponent(tracking) + "~FDFR",
+    timestamp: new Date().toISOString()
+  });
+});
+
+
+
+app.get("/test-estes", function(req, res){
+  const tracking = cleanTracking(req.query.tracking || req.query.pro || "1658318875");
+
+  res.json({
+    success: true,
+    route: "/test-estes",
+    message: "Estes route file is live. This does not scrape Estes.",
+    tracking: tracking,
+    officialEstesUrl: "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO",
     timestamp: new Date().toISOString()
   });
 });
@@ -54,6 +69,45 @@ async function launchBrowser(){
     ]
   });
 }
+
+async function speedUpPage(page){
+  await page.route("**/*", function(route){
+    const request = route.request();
+    const type = request.resourceType();
+
+    if(type === "image" || type === "font" || type === "media"){
+      return route.abort().catch(function(){});
+    }
+
+    return route.continue().catch(function(){});
+  }).catch(function(){});
+}
+
+async function clickPossibleCookieButtons(page){
+  const selectors = [
+    "button:has-text('Accept')",
+    "button:has-text('Accept All')",
+    "button:has-text('I Accept')",
+    "button:has-text('Agree')",
+    "button:has-text('OK')",
+    "button:has-text('Close')"
+  ];
+
+  for(const selector of selectors){
+    try{
+      const button = page.locator(selector).first();
+      if(await button.isVisible({ timeout: 800 })){
+        await button.click({ force: true, timeout: 1500 }).catch(function(){});
+        await page.waitForTimeout(500);
+        return true;
+      }
+    } catch(error){}
+  }
+
+  return false;
+}
+
+
 
 function cleanTracking(value){
   return String(value || "").trim().replace(/\s+/g, "");
@@ -419,11 +473,15 @@ async function scrapeDirectCarrier(options){
       }
     });
 
+    await speedUpPage(page);
+
     await page.goto(url, {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
+    await clickPossibleCookieButtons(page);
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(function(){});
     await page.waitForTimeout(waitFor);
 
     const report = await getPageReport(page);
@@ -477,6 +535,8 @@ async function scrapeFormCarrier(options){
         height: 768
       }
     });
+
+    await speedUpPage(page);
 
     await page.goto(startUrl, {
       waitUntil: "domcontentloaded",
@@ -1047,6 +1107,8 @@ async function runFedExTracking(tracking){
       }
     });
 
+    await speedUpPage(page);
+
     const directUrl = "https://www.fedexfreight.com/fedextrack/?trknbr=" + encodeURIComponent(tracking) + "&trkqual=~" + encodeURIComponent(tracking) + "~FDFR";
 
     await page.goto(directUrl, {
@@ -1213,8 +1275,8 @@ app.post("/track-estes", async function(req, res){
     carrierName: "Estes Express",
     tracking: tracking,
     url: "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO",
-    waitFor: 10000
-  }), 25000, "Estes Express tracking");
+    waitFor: 18000
+  }), 55000, "Estes Express tracking");
 
   return res.json(result);
 });
@@ -1233,8 +1295,8 @@ app.get("/track-estes", async function(req, res){
     carrierName: "Estes Express",
     tracking: tracking,
     url: "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO",
-    waitFor: 10000
-  }), 25000, "Estes Express tracking");
+    waitFor: 18000
+  }), 55000, "Estes Express tracking");
 
   return res.json(result);
 });
@@ -1376,8 +1438,8 @@ app.post("/track", async function(req, res){
       carrierName: "Estes Express",
       tracking: tracking,
       url: "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO",
-      waitFor: 10000
-    }), 25000, "Estes Express tracking");
+      waitFor: 18000
+    }), 55000, "Estes Express tracking");
 
     return res.json(result);
   }

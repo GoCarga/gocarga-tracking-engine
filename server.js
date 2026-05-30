@@ -379,11 +379,28 @@ app.post("/track-aaa", async function(req, res){
 
 
 function parseFedExFreightText(bodyText, tracking){
-  const text = String(bodyText || "").replace(/\s+/g, " ").trim();
+  const rawText = String(bodyText || "");
+  const text = rawText.replace(/\s+/g, " ").trim();
+
+  function cleanValue(value){
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .replace(/\s+View travel history.*$/i, "")
+      .replace(/\s+shipmentItem.*$/i, "")
+      .replace(/\s+Back to top.*$/i, "")
+      .trim();
+  }
 
   function matchValue(pattern){
     const match = text.match(pattern);
-    return match && match[1] ? String(match[1]).replace(/\s+/g, " ").trim() : "";
+    return match && match[1] ? cleanValue(match[1]) : "";
+  }
+
+  function cleanDateTime(value){
+    return cleanValue(value)
+      .replace(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)(\d)/i, "$1 $2")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   const lowerText = text.toLowerCase();
@@ -395,9 +412,9 @@ function parseFedExFreightText(bodyText, tracking){
     lowerText.indexOf("label created") >= 0 ? "Label Created" :
     "Tracking Found";
 
-  const deliveredDateTime = matchValue(/DELIVERED\s+(.+?)\s+Signed for by:/i) ||
+  const deliveredDateTime = cleanDateTime(matchValue(/DELIVERED\s+(.+?)\s+Signed for by:/i) ||
     matchValue(/Delivered\s+(.+?)\s+Signed for by:/i) ||
-    matchValue(/DELIVERED\s+(.+?)\s+Services/i);
+    matchValue(/DELIVERED\s+(.+?)\s+Services/i));
 
   const signedBy = matchValue(/Signed for by:\s+(.+?)\s+Obtain proof/i) ||
     matchValue(/Signed for by:\s+(.+?)\s+DELIVERY STATUS/i);
@@ -405,7 +422,8 @@ function parseFedExFreightText(bodyText, tracking){
   const originTerminal = matchValue(/Origin Terminal\s+(.+?)\s+We have your shipment/i) ||
     matchValue(/Origin Terminal\s+(.+?)\s+Delivered/i);
 
-  const destinationTerminal = matchValue(/Destination Terminal\s+(.+?)\s+shipmentItem/i) ||
+  const destinationTerminal = matchValue(/Destination Terminal\s+(.+?)\s+View travel history/i) ||
+    matchValue(/Destination Terminal\s+(.+?)\s+shipmentItem/i) ||
     matchValue(/Destination Terminal\s+(.+?)\s+Shipment facts/i);
 
   const service = matchValue(/Services\s+Service\s+(.+?)\s+Terms/i) ||
@@ -423,69 +441,74 @@ function parseFedExFreightText(bodyText, tracking){
 
   function addEvent(statusName, description, location, timestamp){
     events.push({
-      status: statusName,
-      description: description,
-      location: location || "FedEx Freight",
-      timestamp: timestamp || "Carrier update",
+      status: cleanValue(statusName),
+      description: cleanValue(description),
+      location: cleanValue(location || "FedEx Freight"),
+      timestamp: cleanDateTime(timestamp || "Carrier update"),
       completed: true
     });
   }
 
-  const travelHistoryMatch = text.match(/Travel HistoryDateTime, Status and Location(.+?)shipmentItem\.keyStatusBack to top/i);
-  const travelHistoryText = travelHistoryMatch && travelHistoryMatch[1] ? travelHistoryMatch[1] : "";
+  const travelStart = rawText.indexOf("Travel History");
+  const travelEnd = rawText.indexOf("Watch list");
+  const travelText = travelStart >= 0 && travelEnd > travelStart ? rawText.slice(travelStart, travelEnd) : "";
 
-  if(travelHistoryText){
-    const simpleHistory = travelHistoryText
-      .replace(/Monday,/g, "|Monday,")
-      .replace(/Tuesday,/g, "|Tuesday,")
-      .replace(/Wednesday,/g, "|Wednesday,")
-      .replace(/Thursday,/g, "|Thursday,")
-      .replace(/Friday,/g, "|Friday,")
-      .replace(/Saturday,/g, "|Saturday,")
-      .replace(/Sunday,/g, "|Sunday,");
+  if(travelText){
+    const lines = travelText
+      .split(/\n+/)
+      .map(function(line){ return cleanValue(line); })
+      .filter(Boolean);
 
-    simpleHistory.split("|").forEach(function(item){
-      const row = item.trim();
-      if(!row) return;
+    let activeDate = "";
 
-      const dateMatch = row.match(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*(\d{1,2}\/\d{1,2}\/\d{2,4})(.+)$/i);
-      if(!dateMatch) return;
+    for(let i = 0; i < lines.length; i++){
+      const line = lines[i];
 
-      const datePart = dateMatch[1] + ", " + dateMatch[2];
-      const rest = dateMatch[3];
-
-      const scanMatches = rest.match(/(\d{1,2}:\d{2}\s*[AP]M)(.+?)(?=\d{1,2}:\d{2}\s*[AP]M|$)/gi);
-
-      if(scanMatches){
-        scanMatches.forEach(function(scan){
-          const scanMatch = scan.match(/^(\d{1,2}:\d{2}\s*[AP]M)(.+)$/i);
-          if(!scanMatch) return;
-
-          const timePart = scanMatch[1];
-          const detailPart = scanMatch[2].trim();
-          const locationMatch = detailPart.match(/([A-Z][A-Z\s]+,\s*[A-Z]{2})$/);
-          const location = locationMatch ? locationMatch[1].trim() : "";
-          const description = location ? detailPart.replace(location, "").trim() : detailPart;
-
-          addEvent(description || "FedEx Freight Update", description || "FedEx Freight Update", location || "FedEx Freight", datePart + " " + timePart);
-        });
+      if(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*\d{1,2}\/\d{1,2}\/\d{2,4}$/i.test(line)){
+        activeDate = line;
+        continue;
       }
-    });
+
+      if(/^\d{1,2}:\d{2}\s*[AP]M$/i.test(line) && activeDate){
+        const time = line;
+        const statusLine = cleanValue(lines[i + 1] || "");
+        let descriptionLine = "";
+        let locationLine = "";
+
+        if(lines[i + 2] && /^[A-Z][A-Z\s]+,\s*[A-Z]{2}$/i.test(lines[i + 2])){
+          locationLine = cleanValue(lines[i + 2]);
+          i += 2;
+        } else if(lines[i + 3] && /^[A-Z][A-Z\s]+,\s*[A-Z]{2}$/i.test(lines[i + 3])){
+          descriptionLine = cleanValue(lines[i + 2] || "");
+          locationLine = cleanValue(lines[i + 3]);
+          i += 3;
+        } else {
+          i += 1;
+        }
+
+        const statusName = statusLine || "FedEx Freight Update";
+        const description = descriptionLine ? statusLine + " - " + descriptionLine : statusLine;
+
+        if(statusName && statusName.toLowerCase().indexOf("date") < 0 && statusName.toLowerCase().indexOf("time zone") < 0){
+          addEvent(statusName, description, locationLine || "FedEx Freight", activeDate + " " + time);
+        }
+      }
+    }
   }
 
   if(!events.length && shipDate){
     addEvent("Ship Date", "Shipment date: " + shipDate, originTerminal || "FedEx Freight", shipDate);
   }
 
-  if(originTerminal){
+  if(originTerminal && !events.some(function(event){ return event.status.toLowerCase().indexOf("origin terminal") >= 0; })){
     addEvent("Origin Terminal", "Origin terminal: " + originTerminal, originTerminal, "Carrier update");
   }
 
-  if(destinationTerminal){
+  if(destinationTerminal && !events.some(function(event){ return event.status.toLowerCase().indexOf("destination terminal") >= 0; })){
     addEvent("Destination Terminal", "Destination terminal: " + destinationTerminal, destinationTerminal, "Carrier update");
   }
 
-  if(deliveredDateTime){
+  if(deliveredDateTime && !events.some(function(event){ return event.status.toLowerCase() === "delivered"; })){
     addEvent("Delivered", signedBy ? "Signed by: " + signedBy : "Shipment delivered", destinationTerminal || "FedEx Freight", deliveredDateTime);
   }
 

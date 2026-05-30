@@ -377,6 +377,138 @@ app.post("/track-aaa", async function(req, res){
 });
 
 
+
+function parseFedExFreightText(bodyText, tracking){
+  const text = String(bodyText || "").replace(/\s+/g, " ").trim();
+
+  function matchValue(pattern){
+    const match = text.match(pattern);
+    return match && match[1] ? String(match[1]).replace(/\s+/g, " ").trim() : "";
+  }
+
+  const lowerText = text.toLowerCase();
+
+  const status = lowerText.indexOf("delivered") >= 0 ? "Delivered" :
+    lowerText.indexOf("out for delivery") >= 0 ? "Out For Delivery" :
+    lowerText.indexOf("on the way") >= 0 || lowerText.indexOf("in transit") >= 0 ? "In Transit" :
+    lowerText.indexOf("picked up") >= 0 ? "Picked Up" :
+    lowerText.indexOf("label created") >= 0 ? "Label Created" :
+    "Tracking Found";
+
+  const deliveredDateTime = matchValue(/DELIVERED\s+(.+?)\s+Signed for by:/i) ||
+    matchValue(/Delivered\s+(.+?)\s+Signed for by:/i) ||
+    matchValue(/DELIVERED\s+(.+?)\s+Services/i);
+
+  const signedBy = matchValue(/Signed for by:\s+(.+?)\s+Obtain proof/i) ||
+    matchValue(/Signed for by:\s+(.+?)\s+DELIVERY STATUS/i);
+
+  const originTerminal = matchValue(/Origin Terminal\s+(.+?)\s+We have your shipment/i) ||
+    matchValue(/Origin Terminal\s+(.+?)\s+Delivered/i);
+
+  const destinationTerminal = matchValue(/Destination Terminal\s+(.+?)\s+shipmentItem/i) ||
+    matchValue(/Destination Terminal\s+(.+?)\s+Shipment facts/i);
+
+  const service = matchValue(/Services\s+Service\s+(.+?)\s+Terms/i) ||
+    matchValue(/Service\s+(.+?)\s+Terms/i);
+
+  const billOfLading = matchValue(/Bill of lading number\s+(\S+)/i);
+  const shipDate = matchValue(/Ship date\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+  const weight = matchValue(/Weight\s+(.+?)\s+Total number of handling units/i);
+  const handlingUnits = matchValue(/Total number of handling units\s+(\d+)/i);
+  const pieces = matchValue(/Total pieces\s+(\d+)/i);
+  const totalShipmentWeight = matchValue(/Total shipment weight\s+(.+?)\s+Packaging/i);
+  const packaging = matchValue(/Packaging\s+(.+?)\s+Origin piece count/i);
+
+  const events = [];
+
+  function addEvent(statusName, description, location, timestamp){
+    events.push({
+      status: statusName,
+      description: description,
+      location: location || "FedEx Freight",
+      timestamp: timestamp || "Carrier update",
+      completed: true
+    });
+  }
+
+  const travelHistoryMatch = text.match(/Travel HistoryDateTime, Status and Location(.+?)shipmentItem\.keyStatusBack to top/i);
+  const travelHistoryText = travelHistoryMatch && travelHistoryMatch[1] ? travelHistoryMatch[1] : "";
+
+  if(travelHistoryText){
+    const simpleHistory = travelHistoryText
+      .replace(/Monday,/g, "|Monday,")
+      .replace(/Tuesday,/g, "|Tuesday,")
+      .replace(/Wednesday,/g, "|Wednesday,")
+      .replace(/Thursday,/g, "|Thursday,")
+      .replace(/Friday,/g, "|Friday,")
+      .replace(/Saturday,/g, "|Saturday,")
+      .replace(/Sunday,/g, "|Sunday,");
+
+    simpleHistory.split("|").forEach(function(item){
+      const row = item.trim();
+      if(!row) return;
+
+      const dateMatch = row.match(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*(\d{1,2}\/\d{1,2}\/\d{2,4})(.+)$/i);
+      if(!dateMatch) return;
+
+      const datePart = dateMatch[1] + ", " + dateMatch[2];
+      const rest = dateMatch[3];
+
+      const scanMatches = rest.match(/(\d{1,2}:\d{2}\s*[AP]M)(.+?)(?=\d{1,2}:\d{2}\s*[AP]M|$)/gi);
+
+      if(scanMatches){
+        scanMatches.forEach(function(scan){
+          const scanMatch = scan.match(/^(\d{1,2}:\d{2}\s*[AP]M)(.+)$/i);
+          if(!scanMatch) return;
+
+          const timePart = scanMatch[1];
+          const detailPart = scanMatch[2].trim();
+          const locationMatch = detailPart.match(/([A-Z][A-Z\s]+,\s*[A-Z]{2})$/);
+          const location = locationMatch ? locationMatch[1].trim() : "";
+          const description = location ? detailPart.replace(location, "").trim() : detailPart;
+
+          addEvent(description || "FedEx Freight Update", description || "FedEx Freight Update", location || "FedEx Freight", datePart + " " + timePart);
+        });
+      }
+    });
+  }
+
+  if(!events.length && shipDate){
+    addEvent("Ship Date", "Shipment date: " + shipDate, originTerminal || "FedEx Freight", shipDate);
+  }
+
+  if(originTerminal){
+    addEvent("Origin Terminal", "Origin terminal: " + originTerminal, originTerminal, "Carrier update");
+  }
+
+  if(destinationTerminal){
+    addEvent("Destination Terminal", "Destination terminal: " + destinationTerminal, destinationTerminal, "Carrier update");
+  }
+
+  if(deliveredDateTime){
+    addEvent("Delivered", signedBy ? "Signed by: " + signedBy : "Shipment delivered", destinationTerminal || "FedEx Freight", deliveredDateTime);
+  }
+
+  return {
+    pro: tracking,
+    status: status,
+    deliveredDateTime: deliveredDateTime,
+    signedBy: signedBy,
+    originTerminal: originTerminal,
+    destinationTerminal: destinationTerminal,
+    service: service,
+    weight: weight,
+    handlingUnits: handlingUnits,
+    pieces: pieces,
+    billOfLading: billOfLading,
+    shipDate: shipDate,
+    totalShipmentWeight: totalShipmentWeight,
+    packaging: packaging,
+    events: events
+  };
+}
+
+
 app.post("/track-fedex", async function(req, res){
   const tracking = cleanTracking(req.body.tracking);
 
@@ -499,6 +631,7 @@ app.post("/track-fedex", async function(req, res){
       found: found,
       blocked: blocked,
       finalUrl: finalUrl,
+      parsed: parseFedExFreightText(bodyText, tracking),
       pageText: bodyText.slice(0, 15000),
       debug: {
         title: report.title || "",

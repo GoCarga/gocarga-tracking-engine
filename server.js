@@ -14,8 +14,8 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.8",
-    routes: ["/track-fedex", "/test-fedex", "/test-estes", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
+    version: "2.9",
+    routes: ["/track-fedex", "/test-fedex", "/test-estes", "/test-tforce", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
 
@@ -44,6 +44,21 @@ app.get("/test-estes", function(req, res){
     message: "Estes route file is live. This does not scrape Estes.",
     tracking: tracking,
     officialEstesUrl: "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO",
+    timestamp: new Date().toISOString()
+  });
+});
+
+
+
+app.get("/test-tforce", function(req, res){
+  const tracking = cleanTracking(req.query.tracking || req.query.pro || "571887886");
+
+  res.json({
+    success: true,
+    route: "/test-tforce",
+    message: "TForce route file is live. This does not scrape TForce.",
+    tracking: tracking,
+    officialTForceUrl: "https://www.tforcefreight.com/ltl/apps/Tracking?proNumbers=" + encodeURIComponent(tracking),
     timestamp: new Date().toISOString()
   });
 });
@@ -2094,6 +2109,384 @@ app.get("/track-dayton", async function(req, res){
   return res.json(result);
 });
 
+
+async function scrapeTForceTracking(tracking){
+  tracking = cleanTracking(tracking);
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+
+    const page = await browser.newPage({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+      viewport: {
+        width: 1366,
+        height: 768
+      }
+    });
+
+    await speedUpPage(page);
+
+    const directUrl = "https://www.tforcefreight.com/ltl/apps/Tracking?proNumbers=" + encodeURIComponent(tracking);
+
+    await page.goto(directUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000
+    });
+
+    await clickPossibleCookieButtons(page);
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(function(){});
+    await page.waitForTimeout(8000);
+
+    let report = await getPageReport(page);
+    let bodyText = report && report.bodyText ? report.bodyText : "";
+    let finalUrl = page.url();
+
+    if(!tforcePageHasResult(bodyText, tracking)){
+      const filled = await setInputValue(page, [
+        "input[placeholder*='PRO']",
+        "input[placeholder*='pro']",
+        "input[placeholder*='Tracking']",
+        "input[placeholder*='tracking']",
+        "input[aria-label*='PRO']",
+        "input[aria-label*='Tracking']",
+        "input[name*='pro']",
+        "input[id*='pro']",
+        "input[type='search']",
+        "input[type='text']",
+        "textarea",
+        "input"
+      ], tracking);
+
+      await page.waitForTimeout(1500);
+
+      const clicked = await clickBySelectors(page, [
+        "button:has-text('Track')",
+        "button:has-text('TRACK')",
+        "button:has-text('Search')",
+        "button:has-text('Submit')",
+        "input[type='submit']",
+        "[role='button']:has-text('Track')",
+        "[role='button']:has-text('Search')",
+        "button"
+      ]);
+
+      if(!clicked.success){
+        await page.keyboard.press("Enter").catch(function(){});
+      }
+
+      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(function(){});
+      await page.waitForTimeout(12000);
+
+      report = await getPageReport(page);
+      bodyText = report && report.bodyText ? report.bodyText : "";
+      finalUrl = page.url();
+    }
+
+    await browser.close();
+
+    return buildTForceCarrierResponse({
+      carrierName: "TForce Freight",
+      tracking: tracking,
+      bodyText: bodyText,
+      finalUrl: finalUrl,
+      title: report && report.title ? report.title : ""
+    });
+
+  } catch(error){
+    if(browser){
+      await browser.close().catch(function(){});
+    }
+
+    return {
+      success: false,
+      found: false,
+      carrier: "TForce Freight",
+      tracking: tracking,
+      error: error.message,
+      reason: "SCRAPE_ERROR",
+      finalUrl: "https://www.tforcefreight.com/ltl/apps/Tracking?proNumbers=" + encodeURIComponent(tracking),
+      events: []
+    };
+  }
+}
+
+function tforcePageHasResult(text, tracking){
+  const body = String(text || "").toLowerCase();
+  const cleanPro = String(tracking || "").toLowerCase();
+
+  if(body.indexOf(cleanPro) < 0) return false;
+
+  return body.indexOf("delivered") >= 0 ||
+    body.indexOf("in transit") >= 0 ||
+    body.indexOf("out for delivery") >= 0 ||
+    body.indexOf("pickup") >= 0 ||
+    body.indexOf("shipment") >= 0 ||
+    body.indexOf("pro number") >= 0 ||
+    body.indexOf("consignee") >= 0 ||
+    body.indexOf("shipper") >= 0;
+}
+
+function buildTForceCarrierResponse(options){
+  const text = cleanTextValue(options.bodyText || "");
+  const lines = compactTrackingLines(text);
+  const tracking = cleanTracking(options.tracking);
+  const finalUrl = options.finalUrl || "https://www.tforcefreight.com/ltl/apps/Tracking?proNumbers=" + encodeURIComponent(tracking);
+  const lower = text.toLowerCase();
+
+  const blocked = lower.indexOf("captcha") >= 0 ||
+    lower.indexOf("verify you are human") >= 0 ||
+    lower.indexOf("access denied") >= 0 ||
+    lower.indexOf("forbidden") >= 0;
+
+  const notFound = lower.indexOf("not found") >= 0 ||
+    lower.indexOf("no shipment") >= 0 ||
+    lower.indexOf("unable to locate") >= 0 ||
+    lower.indexOf("no records") >= 0 ||
+    lower.indexOf("no results") >= 0;
+
+  const row = parseTForceText(text, tracking);
+  const status = row.status || (notFound ? "Not Found" : "Tracking Found");
+  const state = normalizeSimpleState(status);
+  const events = row.events.length ? row.events : [{
+    status: status,
+    description: status,
+    location: normalizeSimpleLocation(row.currentLocation || "TForce Freight"),
+    timestamp: row.deliveryDate || row.pickupDate || "Carrier update",
+    completed: state !== "tracking_pending" && state !== "not_found"
+  }];
+
+  return {
+    success: !blocked && !notFound && tforcePageHasResult(text, tracking),
+    found: !blocked && !notFound && tforcePageHasResult(text, tracking),
+    blocked: blocked,
+    reason: blocked ? "CAPTCHA_OR_ACCESS_BLOCK" : notFound ? "NOT_FOUND" : tforcePageHasResult(text, tracking) ? "" : "TFORCE_DETAILS_NOT_RETURNED",
+    carrier: "TForce Freight",
+    tracking: tracking,
+    pro: row.pro || tracking,
+    status: status,
+    state: state,
+    statusCopy: status,
+    service: row.service || "TForce Freight",
+    handlingUnits: row.pieces || row.handlingUnits || "",
+    pieces: row.pieces || "",
+    totalPieces: row.pieces || "",
+    shipmentWeight: row.weight || "",
+    weight: row.weight || "",
+    packagingType: row.packaging || "",
+    eta: {
+      date: row.deliveryDate || row.estimatedDelivery || "",
+      time: row.deliveryDate ? "TForce delivery scan" : row.estimatedDelivery ? "TForce estimated delivery" : "",
+      estimated: state !== "delivered"
+    },
+    origin: normalizeSimpleLocation(row.origin || ""),
+    destination: normalizeSimpleLocation(row.destination || ""),
+    current_location: normalizeSimpleLocation(row.currentLocation || row.destination || row.origin || ""),
+    delivery: {
+      out_for_delivery: state === "out_for_delivery",
+      delivered: state === "delivered"
+    },
+    events: events,
+    carrier_tracking_url: finalUrl,
+    officialTrackingUrl: finalUrl,
+    parsed: {
+      pro: row.pro || tracking,
+      status: status,
+      service: row.service || "TForce Freight",
+      handlingUnits: row.handlingUnits || row.pieces || "",
+      pieces: row.pieces || "",
+      shipmentWeight: row.weight || "",
+      packagingType: row.packaging || "",
+      billOfLading: row.bol || "",
+      pickupDate: row.pickupDate || "",
+      estimatedDelivery: row.estimatedDelivery || "",
+      deliveryDate: row.deliveryDate || "",
+      origin: row.origin || "",
+      destination: row.destination || "",
+      travelHistory: events.map(function(event){
+        return {
+          status: event.status,
+          description: event.description,
+          location: event.location.display,
+          time: event.timestamp
+        };
+      })
+    },
+    billOfLading: row.bol || "",
+    bol: row.bol || "",
+    shipDate: row.pickupDate || "",
+    source: "Render TForce Freight",
+    pageText: text.slice(0, 30000),
+    debug: {
+      title: options.title || "",
+      url: finalUrl,
+      parsedRow: row
+    }
+  };
+}
+
+function parseTForceText(text, tracking){
+  const flat = cleanTextValue(String(text || "").replace(/\n+/g, " "));
+  const lines = compactTrackingLines(text);
+  const result = {
+    pro: tracking,
+    status: "",
+    service: "",
+    pieces: "",
+    handlingUnits: "",
+    weight: "",
+    packaging: "",
+    bol: "",
+    pickupDate: "",
+    estimatedDelivery: "",
+    deliveryDate: "",
+    origin: "",
+    destination: "",
+    currentLocation: "",
+    events: []
+  };
+
+  result.status = firstMatch(flat, [
+    /Status\s*:?\s*([A-Za-z ]+?)(?=\s+(?:PRO|Pickup|Delivery|Origin|Destination|Shipper|Consignee|Weight|Pieces|BOL|Reference|Service)|$)/i,
+    /Shipment Status\s*:?\s*([A-Za-z ]+?)(?=\s+(?:PRO|Pickup|Delivery|Origin|Destination|Shipper|Consignee|Weight|Pieces|BOL|Reference|Service)|$)/i,
+    /\b(Delivered|Out for Delivery|In Transit|Picked Up|Pickup|Appointment Pending|Exception)\b/i
+  ]);
+
+  result.pro = firstMatch(flat, [
+    /PRO\s*(?:Number|#)?\s*:?\s*(\d{7,12})/i,
+    /Tracking\s*(?:Number|#)?\s*:?\s*(\d{7,12})/i
+  ]) || tracking;
+
+  result.pickupDate = firstMatch(flat, [
+    /Pickup\s*Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i,
+    /Ship\s*Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i
+  ]);
+
+  result.estimatedDelivery = firstMatch(flat, [
+    /Estimated\s*Delivery\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i,
+    /ETA\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i
+  ]);
+
+  result.deliveryDate = firstMatch(flat, [
+    /Delivery\s*Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i,
+    /Delivered\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i
+  ]);
+
+  result.origin = cleanTForceLocation(firstMatch(flat, [
+    /Origin\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i,
+    /Shipper\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i
+  ]));
+
+  result.destination = cleanTForceLocation(firstMatch(flat, [
+    /Destination\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i,
+    /Consignee\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i
+  ]));
+
+  result.currentLocation = cleanTForceLocation(firstMatch(flat, [
+    /Current\s*Location\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i,
+    /Location\s*:?\s*([A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?)/i
+  ]));
+
+  result.pieces = firstMatch(flat, [
+    /Pieces\s*:?\s*([0-9,]+)/i,
+    /Total\s*Pieces\s*:?\s*([0-9,]+)/i,
+    /Handling\s*Units\s*:?\s*([0-9,]+)/i
+  ]);
+
+  result.handlingUnits = firstMatch(flat, [
+    /Handling\s*Units\s*:?\s*([0-9,]+)/i
+  ]) || result.pieces;
+
+  result.weight = firstMatch(flat, [
+    /Weight\s*:?\s*([0-9,]+(?:\.[0-9]+)?\s*(?:lbs?|pounds?)?)/i,
+    /Shipment\s*Weight\s*:?\s*([0-9,]+(?:\.[0-9]+)?\s*(?:lbs?|pounds?)?)/i
+  ]);
+
+  result.bol = firstMatch(flat, [
+    /BOL\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i,
+    /Bill\s*of\s*Lading\s*(?:Number|#)?\s*:?\s*([A-Za-z0-9-]+)/i
+  ]);
+
+  result.service = firstMatch(flat, [
+    /Service\s*:?\s*([A-Za-z0-9 \-/]+?)(?=\s+(?:Status|PRO|Pickup|Delivery|Origin|Destination|Weight|Pieces|BOL)|$)/i
+  ]);
+
+  result.events = parseTForceEvents(lines, result);
+
+  return result;
+}
+
+function parseTForceEvents(lines, result){
+  const events = [];
+  const eventWords = [
+    "Delivered",
+    "Out for Delivery",
+    "In Transit",
+    "Picked Up",
+    "Pickup",
+    "Arrived",
+    "Departed",
+    "Exception",
+    "Appointment"
+  ];
+
+  for(let i = 0; i < lines.length; i++){
+    const line = lines[i];
+    const found = eventWords.find(function(word){
+      return line.toLowerCase().indexOf(word.toLowerCase()) >= 0;
+    });
+
+    if(!found) continue;
+
+    const windowLines = lines.slice(Math.max(0, i - 3), Math.min(lines.length, i + 6));
+    const windowText = windowLines.join(" ");
+    const time = firstMatch(windowText, [
+      /(\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))/i,
+      /(\d{1,2}\/\d{1,2}\/\d{2,4})/i
+    ]);
+    const location = cleanTForceLocation(windowLines.find(function(item){
+      return /^[A-Za-z .'-]+,\s*[A-Z]{2}(?:\s+\d{5})?$/i.test(item);
+    }) || result.currentLocation || result.destination || result.origin || "TForce Freight");
+
+    events.push({
+      status: normalizeTForceStatus(found),
+      description: line,
+      location: normalizeSimpleLocation(location),
+      timestamp: time || "Carrier update",
+      completed: true
+    });
+  }
+
+  return events;
+}
+
+function normalizeTForceStatus(value){
+  const lower = String(value || "").toLowerCase();
+
+  if(lower.indexOf("delivered") >= 0) return "Delivered";
+  if(lower.indexOf("out for delivery") >= 0) return "Out For Delivery";
+  if(lower.indexOf("transit") >= 0) return "In Transit";
+  if(lower.indexOf("picked") >= 0 || lower.indexOf("pickup") >= 0) return "Picked Up";
+  if(lower.indexOf("arrived") >= 0) return "Arrived";
+  if(lower.indexOf("departed") >= 0) return "Departed";
+  if(lower.indexOf("appointment") >= 0) return "Appointment";
+  if(lower.indexOf("exception") >= 0) return "Exception";
+
+  return cleanTextValue(value || "Carrier Update");
+}
+
+function cleanTForceLocation(value){
+  let text = cleanTextValue(value);
+  text = text.replace(/\s+Status\s+.*$/i, "");
+  text = text.replace(/\s+Pickup\s+.*$/i, "");
+  text = text.replace(/\s+Delivery\s+.*$/i, "");
+  text = text.replace(/\s+Weight\s+.*$/i, "");
+  text = text.replace(/\s+Pieces\s+.*$/i, "");
+  text = text.replace(/\s+BOL\s+.*$/i, "");
+  return text;
+}
+
+
 app.post("/track-tforce", async function(req, res){
   const tracking = cleanTracking(req.body.tracking || req.query.tracking || req.body.pro || req.query.pro);
 
@@ -2104,13 +2497,7 @@ app.post("/track-tforce", async function(req, res){
     });
   }
 
-  const result = await withTimeout(scrapeDirectCarrier({
-    carrierName: "TForce Freight",
-    tracking: tracking,
-    url: "https://www.tforcefreight.com/ltl/apps/Tracking?proNumbers=" + encodeURIComponent(tracking),
-    waitFor: 11000
-  }), 27000, "TForce Freight tracking");
-
+  const result = await withTimeout(scrapeTForceTracking(tracking), 65000, "TForce Freight tracking");
   return res.json(result);
 });
 
@@ -2124,13 +2511,7 @@ app.get("/track-tforce", async function(req, res){
     });
   }
 
-  const result = await withTimeout(scrapeDirectCarrier({
-    carrierName: "TForce Freight",
-    tracking: tracking,
-    url: "https://www.tforcefreight.com/ltl/apps/Tracking?proNumbers=" + encodeURIComponent(tracking),
-    waitFor: 11000
-  }), 27000, "TForce Freight tracking");
-
+  const result = await withTimeout(scrapeTForceTracking(tracking), 65000, "TForce Freight tracking");
   return res.json(result);
 });
 
@@ -2194,13 +2575,7 @@ app.post("/track", async function(req, res){
   }
 
   if(carrier.indexOf("tforce") >= 0 || carrier.indexOf("t-force") >= 0){
-    const result = await withTimeout(scrapeDirectCarrier({
-      carrierName: "TForce Freight",
-      tracking: tracking,
-      url: "https://www.tforcefreight.com/ltl/apps/Tracking?proNumbers=" + encodeURIComponent(tracking),
-      waitFor: 11000
-    }), 27000, "TForce Freight tracking");
-
+    const result = await withTimeout(scrapeTForceTracking(tracking), 65000, "TForce Freight tracking");
     return res.json(result);
   }
 

@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.9",
+    version: "2.10",
     routes: ["/track-fedex", "/test-fedex", "/test-estes", "/test-tforce", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
@@ -2324,6 +2324,25 @@ function buildTForceCarrierResponse(options){
     }
   };
 }
+
+
+function firstMatch(text, patterns){
+  const value = String(text || "");
+
+  for(const pattern of patterns){
+    const match = value.match(pattern);
+    if(match && match[1]){
+      return cleanTextValue(match[1]);
+    }
+
+    if(match && match[0]){
+      return cleanTextValue(match[0]);
+    }
+  }
+
+  return "";
+}
+
 
 function parseTForceText(text, tracking){
   const flat = cleanTextValue(String(text || "").replace(/\n+/g, " "));

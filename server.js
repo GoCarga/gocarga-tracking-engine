@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.3",
+    version: "2.4",
     routes: ["/track-fedex", "/test-fedex", "/test-estes", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
@@ -85,6 +85,8 @@ async function speedUpPage(page){
 
 async function clickPossibleCookieButtons(page){
   const selectors = [
+    "#onetrust-accept-btn-handler",
+    "button#onetrust-accept-btn-handler",
     "button:has-text('Accept')",
     "button:has-text('Accept All')",
     "button:has-text('I Accept')",
@@ -96,13 +98,22 @@ async function clickPossibleCookieButtons(page){
   for(const selector of selectors){
     try{
       const button = page.locator(selector).first();
-      if(await button.isVisible({ timeout: 800 })){
-        await button.click({ force: true, timeout: 1500 }).catch(function(){});
-        await page.waitForTimeout(500);
+      if(await button.isVisible({ timeout: 1200 })){
+        await button.click({ force: true, timeout: 2000 }).catch(function(){});
+        await page.waitForTimeout(800);
         return true;
       }
     } catch(error){}
   }
+
+  try{
+    await page.evaluate(function(){
+      const banner = document.querySelector("#onetrust-banner-sdk");
+      if(banner){banner.remove();}
+      const overlay = document.querySelector(".onetrust-pc-dark-filter");
+      if(overlay){overlay.remove();}
+    });
+  } catch(error){}
 
   return false;
 }
@@ -1261,6 +1272,168 @@ app.get("/track-fedex", async function(req, res){
 
 
 
+
+async function scrapeEstesTracking(tracking){
+  tracking = cleanTracking(tracking);
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+
+    const page = await browser.newPage({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+      viewport: {
+        width: 1366,
+        height: 768
+      }
+    });
+
+    await speedUpPage(page);
+
+    await page.goto("https://www.estes-express.com/myestes/shipment-tracking/", {
+      waitUntil: "domcontentloaded",
+      timeout: 60000
+    });
+
+    await clickPossibleCookieButtons(page);
+    await page.waitForTimeout(3000);
+
+    const filled = await setInputValue(page, [
+      "textarea",
+      "textarea[placeholder*='tracking']",
+      "textarea[aria-label*='tracking']",
+      "textarea[name*='tracking']",
+      "textarea[id*='tracking']",
+      "input[placeholder*='tracking']",
+      "input[placeholder*='Tracking']",
+      "input[aria-label*='tracking']",
+      "input[aria-label*='Tracking']",
+      "input[type='search']",
+      "input[type='text']",
+      "input"
+    ], tracking);
+
+    if(!filled.success){
+      const beforeReport = await getPageReport(page);
+      throw new Error("Estes tracking input was not found. Page report: " + JSON.stringify(beforeReport).slice(0, 2500));
+    }
+
+    await page.waitForTimeout(1200);
+
+    const clicked = await clickBySelectors(page, [
+      "button:has-text('SEARCH')",
+      "button:has-text('Search')",
+      "button:has-text('Track')",
+      "input[type='submit']",
+      "[role='button']:has-text('SEARCH')",
+      "[role='button']:has-text('Search')",
+      "[role='button']:has-text('Track')",
+      "button"
+    ]);
+
+    if(!clicked.success){
+      await page.keyboard.press("Enter").catch(function(){});
+    }
+
+    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(function(){});
+    await page.waitForTimeout(15000);
+
+    const report = await getPageReport(page);
+    const finalUrl = page.url();
+
+    await browser.close();
+
+    return buildEstesCarrierResponse({
+      carrierName: "Estes Express",
+      tracking: tracking,
+      bodyText: report && report.bodyText ? report.bodyText : "",
+      finalUrl: finalUrl,
+      title: report && report.title ? report.title : ""
+    });
+
+  } catch(error){
+    if(browser){
+      await browser.close().catch(function(){});
+    }
+
+    return {
+      success: false,
+      found: false,
+      carrier: "Estes Express",
+      tracking: tracking,
+      error: error.message,
+      reason: "SCRAPE_ERROR",
+      finalUrl: "https://www.estes-express.com/myestes/shipment-tracking/",
+      events: []
+    };
+  }
+}
+
+function buildEstesCarrierResponse(options){
+  const response = buildSimpleCarrierResponse(options);
+  const text = cleanTextValue(options.bodyText || "");
+  const lines = compactTrackingLines(text);
+
+  const cookieOnly = text.indexOf("Shipment Tracking") >= 0 &&
+    text.indexOf("Enter tracking numbers") >= 0 &&
+    text.indexOf("Pickup Visibility") >= 0 &&
+    text.indexOf(options.tracking) < 0;
+
+  if(cookieOnly || response.status.length > 180){
+    response.success = false;
+    response.found = false;
+    response.reason = "ESTES_SEARCH_NOT_SUBMITTED";
+    response.status = "Tracking Pending";
+    response.state = "tracking_pending";
+    response.statusCopy = "Estes page loaded, but the shipment details did not return yet.";
+    response.service = "";
+    response.handlingUnits = "";
+    response.shipmentWeight = "";
+    response.packagingType = "";
+    response.origin = normalizeSimpleLocation("");
+    response.destination = normalizeSimpleLocation("");
+    response.current_location = normalizeSimpleLocation("");
+    response.events = [{
+      status: "Tracking Search Pending",
+      description: "Estes page loaded, but shipment details were not returned.",
+      location: normalizeSimpleLocation("Estes Express"),
+      timestamp: "Carrier update",
+      completed: false
+    }];
+    response.parsed = {
+      pro: options.tracking,
+      status: response.status,
+      service: "",
+      handlingUnits: "",
+      shipmentWeight: "",
+      packagingType: "",
+      travelHistory: response.events.map(function(event){
+        return {
+          status: event.status,
+          description: event.description,
+          location: event.location.display,
+          time: event.timestamp
+        };
+      })
+    };
+  }
+
+  const possibleStatus = lineAfterLabel(lines, ["Status", "Shipment Status", "Delivery Status", "Current Status"]);
+  if(possibleStatus && possibleStatus.length < 120){
+    response.status = normalizeSimpleStatus(possibleStatus);
+    response.state = normalizeSimpleState(response.status);
+    response.statusCopy = response.status;
+  }
+
+  const origin = lineAfterLabel(lines, ["Origin", "Origin Terminal", "Shipper"]);
+  const destination = lineAfterLabel(lines, ["Destination", "Destination Terminal", "Consignee"]);
+  if(origin){response.origin = normalizeSimpleLocation(origin);}
+  if(destination){response.destination = normalizeSimpleLocation(destination);}
+
+  return response;
+}
+
+
 app.post("/track-estes", async function(req, res){
   const tracking = cleanTracking(req.body.tracking || req.query.tracking || req.body.pro || req.query.pro);
 
@@ -1271,13 +1444,7 @@ app.post("/track-estes", async function(req, res){
     });
   }
 
-  const result = await withTimeout(scrapeDirectCarrier({
-    carrierName: "Estes Express",
-    tracking: tracking,
-    url: "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO",
-    waitFor: 18000
-  }), 55000, "Estes Express tracking");
-
+  const result = await withTimeout(scrapeEstesTracking(tracking), 65000, "Estes Express tracking");
   return res.json(result);
 });
 
@@ -1291,13 +1458,7 @@ app.get("/track-estes", async function(req, res){
     });
   }
 
-  const result = await withTimeout(scrapeDirectCarrier({
-    carrierName: "Estes Express",
-    tracking: tracking,
-    url: "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO",
-    waitFor: 18000
-  }), 55000, "Estes Express tracking");
-
+  const result = await withTimeout(scrapeEstesTracking(tracking), 65000, "Estes Express tracking");
   return res.json(result);
 });
 
@@ -1434,13 +1595,7 @@ app.post("/track", async function(req, res){
   }
 
   if(carrier.indexOf("estes") >= 0){
-    const result = await withTimeout(scrapeDirectCarrier({
-      carrierName: "Estes Express",
-      tracking: tracking,
-      url: "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO",
-      waitFor: 18000
-    }), 55000, "Estes Express tracking");
-
+    const result = await withTimeout(scrapeEstesTracking(tracking), 65000, "Estes Express tracking");
     return res.json(result);
   }
 

@@ -76,7 +76,7 @@ async function getPageReport(page){
     return {
       title: document.title,
       url: window.location.href,
-      bodyText: document.body ? document.body.innerText.slice(0, 2500) : "",
+      bodyText: document.body ? document.body.innerText.slice(0, 15000) : "",
       inputs: inputList,
       buttons: buttonList,
       forms: forms
@@ -377,64 +377,6 @@ app.post("/track-aaa", async function(req, res){
 });
 
 
-
-function parseFedExFreightText(bodyText, tracking){
-  const text = String(bodyText || "").replace(/\s+/g, " ").trim();
-
-  function matchValue(pattern){
-    const match = text.match(pattern);
-    return match && match[1] ? match[1].trim() : "";
-  }
-
-  function cleanValue(value){
-    return String(value || "").replace(/\s+/g, " ").trim();
-  }
-
-  const lowerText = text.toLowerCase();
-
-  const status = lowerText.indexOf("delivered") >= 0 ? "Delivered" :
-    lowerText.indexOf("out for delivery") >= 0 ? "Out For Delivery" :
-    lowerText.indexOf("on the way") >= 0 || lowerText.indexOf("in transit") >= 0 ? "In Transit" :
-    lowerText.indexOf("label created") >= 0 ? "Label Created" :
-    "Pending";
-
-  const deliveredDateTime = matchValue(/DELIVERED\s+(.+?)\s+Signed for by:/i) ||
-    matchValue(/Delivered\s+(.+?)\s+Signed for by:/i) ||
-    matchValue(/DELIVERED\s+(.+?)\s+DELIVERY STATUS/i);
-
-  const signedBy = matchValue(/Signed for by:\s+(.+?)\s+Obtain proof/i) ||
-    matchValue(/Signed for by:\s+(.+?)\s+DELIVERY STATUS/i);
-
-  const originTerminal = matchValue(/Origin Terminal\s+(.+?)\s+We have your shipment/i) ||
-    matchValue(/Origin Terminal\s+(.+?)\s+ON THE WAY/i);
-
-  const destinationTerminal = matchValue(/Destination Terminal\s+(.+?)\s+shipmentItem/i) ||
-    matchValue(/Destination Terminal\s+(.+?)\s+Shipment facts/i);
-
-  const service = matchValue(/Service\s+(.+?)\s+Terms/i);
-  const weight = matchValue(/Weight\s+(.+?)\s+Total number of handling units/i);
-  const handlingUnits = matchValue(/Total number of handling units\s+(\d+)/i);
-  const pieces = matchValue(/Total pieces\s+(\d+)/i);
-  const bol = matchValue(/Bill of lading number\s+(\S+)/i);
-  const shipDate = matchValue(/Ship date\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
-
-  return {
-    pro: tracking,
-    status: cleanValue(status),
-    deliveredDateTime: cleanValue(deliveredDateTime),
-    signedBy: cleanValue(signedBy),
-    originTerminal: cleanValue(originTerminal),
-    destinationTerminal: cleanValue(destinationTerminal),
-    service: cleanValue(service),
-    weight: cleanValue(weight),
-    handlingUnits: cleanValue(handlingUnits),
-    pieces: cleanValue(pieces),
-    billOfLading: cleanValue(bol),
-    shipDate: cleanValue(shipDate)
-  };
-}
-
-
 app.post("/track-fedex", async function(req, res){
   const tracking = cleanTracking(req.body.tracking);
 
@@ -557,8 +499,7 @@ app.post("/track-fedex", async function(req, res){
       found: found,
       blocked: blocked,
       finalUrl: finalUrl,
-      parsed: parseFedExFreightText(bodyText, tracking),
-      pageText: bodyText.slice(0, 2500),
+      pageText: bodyText.slice(0, 15000),
       debug: {
         title: report.title || "",
         url: report.url || finalUrl

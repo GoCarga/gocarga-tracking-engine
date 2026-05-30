@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.13",
+    version: "2.14",
     routes: ["/track-fedex", "/test-fedex", "/test-estes", "/test-tforce", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
@@ -467,7 +467,8 @@ function buildSimpleCarrierResponse(options){
           status: event.status,
           description: event.description,
           location: event.location.display,
-          time: event.timestamp
+          time: event.timestamp,
+          trailer: event.trailer || ""
         };
       })
     },
@@ -1616,7 +1617,8 @@ function buildEstesCarrierResponse(options){
           status: event.status,
           description: event.description,
           location: event.location.display,
-          time: event.timestamp
+          time: event.timestamp,
+          trailer: event.trailer || ""
         };
       })
     },
@@ -2430,7 +2432,8 @@ function buildTForceCarrierResponse(options){
           status: event.status,
           description: event.description,
           location: event.location.display,
-          time: event.timestamp
+          time: event.timestamp,
+          trailer: event.trailer || ""
         };
       })
     },
@@ -2573,7 +2576,8 @@ function parseTForceText(text, tracking){
   result.purchaseOrderNumber = expanded.purchaseOrderNumber || "";
   result.terminal = expanded.terminal || "";
 
-  result.events = buildTForceCleanEvents(result);
+  const progressEvents = parseTForceShipmentProgress(block);
+  result.events = progressEvents.length ? progressEvents : buildTForceCleanEvents(result);
 
   return result;
 }
@@ -2692,6 +2696,84 @@ function buildTForceCleanEvents(row){
   }
 
   return events;
+}
+
+
+
+function parseTForceShipmentProgress(block){
+  const events = [];
+  const value = String(block || "");
+  const start = value.search(/Shipment Progress/i);
+
+  if(start < 0){
+    return events;
+  }
+
+  let end = value.search(/Hide Details|Shipment Details|Tracking results provided|Customize Your Tracking/i);
+  if(end < start){
+    end = Math.min(value.length, start + 5000);
+  }
+
+  const chunk = value.slice(start, end);
+  const lines = chunk.split(/\n+/).map(function(line){
+    return cleanTextValue(line);
+  }).filter(Boolean);
+
+  for(let i = 0; i < lines.length; i++){
+    const line = lines[i];
+
+    if(/^(Location|Date|Time|Activity|Trailer|Shipment Progress)$/i.test(line)){
+      continue;
+    }
+
+    const tabMatch = line.match(/^(.+?,\s*[A-Z]{2})\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{1,2}:\d{2}\s*(?:AM|PM))\s+(.+?)(?:\s+([0-9A-Z]+\s+[A-Z0-9]+))?$/i);
+    if(tabMatch){
+      events.push({
+        status: normalizeTForceProgressActivity(tabMatch[4]),
+        description: cleanTextValue(tabMatch[4]),
+        location: normalizeSimpleLocation(cleanTextValue(tabMatch[1])),
+        timestamp: cleanTextValue(tabMatch[2] + " " + tabMatch[3]),
+        trailer: cleanTextValue(tabMatch[5] || ""),
+        completed: true
+      });
+      continue;
+    }
+
+    const location = /^[A-Za-z .'-]+,\s*[A-Z]{2}$/i.test(line) ? line : "";
+    const date = lines[i + 1] || "";
+    const time = lines[i + 2] || "";
+    const activity = lines[i + 3] || "";
+    const trailer = lines[i + 4] || "";
+
+    if(location && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(date) && /^\d{1,2}:\d{2}\s*(?:AM|PM)$/i.test(time) && activity){
+      events.push({
+        status: normalizeTForceProgressActivity(activity),
+        description: cleanTextValue(activity),
+        location: normalizeSimpleLocation(location),
+        timestamp: cleanTextValue(date + " " + time),
+        trailer: /^[0-9A-Z]+\s+[A-Z0-9]+$/i.test(trailer) ? trailer : "",
+        completed: true
+      });
+
+      i += /^[0-9A-Z]+\s+[A-Z0-9]+$/i.test(trailer) ? 4 : 3;
+    }
+  }
+
+  return events.reverse();
+}
+
+function normalizeTForceProgressActivity(activity){
+  const text = cleanTextValue(activity);
+  const lower = text.toLowerCase();
+
+  if(lower.indexOf("delivered") >= 0 || lower.indexOf("consignee") >= 0) return "Delivered";
+  if(lower.indexOf("out for delivery") >= 0) return "Out For Delivery";
+  if(lower.indexOf("picked-up") >= 0 || lower.indexOf("picked up") >= 0) return "Picked Up";
+  if(lower.indexOf("departure") >= 0) return "Departed";
+  if(lower.indexOf("arrived") >= 0 || lower.indexOf("service center") >= 0) return "Arrived At Service Center";
+  if(lower.indexOf("tforce freight location") >= 0) return "At TForce Freight Location";
+
+  return text || "Carrier Update";
 }
 
 

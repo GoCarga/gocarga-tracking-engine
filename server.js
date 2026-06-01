@@ -72,6 +72,54 @@ app.get("/health", function(req, res){
   });
 });
 
+app.use(requireRenderAccessForTrackingRoutes);
+
+function requireRenderAccessForTrackingRoutes(req, res, next){
+  const protectedRoutes = [
+    "/track",
+    "/track-fedex",
+    "/track-estes",
+    "/track-abf",
+    "/track-dayton",
+    "/track-tforce",
+    "/track-aaa",
+    "/debug-aaa"
+  ];
+
+  const routePath = String(req.path || "");
+  const shouldProtect = protectedRoutes.some(function(route){
+    return routePath === route || routePath.indexOf(route + "/") === 0;
+  });
+
+  if(!shouldProtect){
+    return next();
+  }
+
+  const requiredKey = String(process.env.GOCARGA_TRACKING_KEY || "").trim();
+
+  if(!requiredKey){
+    return next();
+  }
+
+  const providedKey = String(
+    req.headers["x-gocarga-tracking-key"] ||
+    req.headers["x-api-key"] ||
+    req.query.key ||
+    ""
+  ).trim();
+
+  if(providedKey && providedKey === requiredKey){
+    return next();
+  }
+
+  return res.status(401).json({
+    success: false,
+    found: false,
+    reason: "UNAUTHORIZED_TRACKING_REQUEST",
+    message: "Tracking request is not authorized."
+  });
+}
+
 
 async function launchBrowser(){
   return await chromium.launch({
@@ -435,7 +483,7 @@ function buildSimpleCarrierResponse(options){
     pro: tracking,
     status: status,
     state: state,
-    statusCopy: row.signedBy && state === "delivered" ? "Signed by: " + row.signedBy : status,
+    statusCopy: status,
     service: facts.service || "LTL Freight",
     handlingUnits: facts.handlingUnits || "",
     shipmentWeight: facts.shipmentWeight || "",
@@ -2385,7 +2433,7 @@ function buildTForceCarrierResponse(options){
     pro: row.pro || tracking,
     status: status,
     state: state,
-    statusCopy: row.signedBy && state === "delivered" ? "Signed by: " + row.signedBy : status,
+    statusCopy: status,
     service: row.service || "TForce Freight",
     handlingUnits: row.pieces || row.handlingUnits || "",
     pieces: row.pieces || "",

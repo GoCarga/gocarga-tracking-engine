@@ -14,7 +14,7 @@ app.get("/", function(req, res){
   res.json({
     ok: true,
     service: "GoCarga Tracking Engine",
-    version: "2.14",
+    version: "2.15",
     routes: ["/track-fedex", "/test-fedex", "/test-estes", "/test-tforce", "/track-estes", "/track-abf", "/track-dayton", "/track-tforce", "/track", "/track-aaa", "/debug-aaa", "/health"]
   });
 });
@@ -1393,6 +1393,88 @@ app.get("/track-fedex", async function(req, res){
 
 
 
+async function waitForEstesResults(page, tracking){
+  const pro = cleanTracking(tracking);
+
+  try{
+    await page.waitForFunction(function(value){
+      const text = document.body && document.body.innerText ? document.body.innerText : "";
+      return text.indexOf(value) >= 0 && (
+        text.indexOf("Tracking Results") >= 0 ||
+        text.indexOf("Shipment Details") >= 0 ||
+        text.indexOf("Shipment History") >= 0 ||
+        text.indexOf("Delivery Details") >= 0 ||
+        text.indexOf("Reference Numbers") >= 0 ||
+        text.indexOf("In Transit") >= 0 ||
+        text.indexOf("Delivered") >= 0
+      );
+    }, pro, { timeout: 30000 });
+    return true;
+  } catch(error){}
+
+  try{
+    await page.waitForFunction(function(){
+      const text = document.body && document.body.innerText ? document.body.innerText : "";
+      return text.indexOf("Tracking Results") >= 0 || text.indexOf("Shipment Details") >= 0 || text.indexOf("Shipment History") >= 0;
+    }, { timeout: 12000 });
+    return true;
+  } catch(error){}
+
+  return false;
+}
+
+async function submitEstesSearch(page, tracking){
+  const filled = await setInputValue(page, [
+    "textarea",
+    "textarea[placeholder*='tracking']",
+    "textarea[placeholder*='Tracking']",
+    "textarea[aria-label*='tracking']",
+    "textarea[aria-label*='Tracking']",
+    "textarea[name*='tracking']",
+    "textarea[id*='tracking']",
+    "input[placeholder*='tracking']",
+    "input[placeholder*='Tracking']",
+    "input[aria-label*='tracking']",
+    "input[aria-label*='Tracking']",
+    "input[type='search']",
+    "input[type='text']",
+    "input"
+  ], tracking);
+
+  if(!filled.success){
+    return {
+      success: false,
+      filled: filled,
+      clicked: {
+        success: false
+      }
+    };
+  }
+
+  await page.waitForTimeout(1200);
+
+  const clicked = await clickBySelectors(page, [
+    "button:has-text('SEARCH')",
+    "button:has-text('Search')",
+    "button:has-text('Track')",
+    "input[type='submit']",
+    "[role='button']:has-text('SEARCH')",
+    "[role='button']:has-text('Search')",
+    "[role='button']:has-text('Track')",
+    "button"
+  ]);
+
+  if(!clicked.success){
+    await page.keyboard.press("Enter").catch(function(){});
+  }
+
+  return {
+    success: true,
+    filled: filled,
+    clicked: clicked
+  };
+}
+
 async function scrapeEstesTracking(tracking){
   tracking = cleanTracking(tracking);
   let browser;
@@ -1410,67 +1492,69 @@ async function scrapeEstesTracking(tracking){
 
     await speedUpPage(page);
 
-    await page.goto("https://www.estes-express.com/myestes/shipment-tracking/", {
+    const directUrl = "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO";
+
+    await page.goto(directUrl, {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
     await clickPossibleCookieButtons(page);
-    await page.waitForTimeout(3000);
-
-    const filled = await setInputValue(page, [
-      "textarea",
-      "textarea[placeholder*='tracking']",
-      "textarea[aria-label*='tracking']",
-      "textarea[name*='tracking']",
-      "textarea[id*='tracking']",
-      "input[placeholder*='tracking']",
-      "input[placeholder*='Tracking']",
-      "input[aria-label*='tracking']",
-      "input[aria-label*='Tracking']",
-      "input[type='search']",
-      "input[type='text']",
-      "input"
-    ], tracking);
-
-    if(!filled.success){
-      const beforeReport = await getPageReport(page);
-      throw new Error("Estes tracking input was not found. Page report: " + JSON.stringify(beforeReport).slice(0, 2500));
-    }
-
-    await page.waitForTimeout(1200);
-
-    const clicked = await clickBySelectors(page, [
-      "button:has-text('SEARCH')",
-      "button:has-text('Search')",
-      "button:has-text('Track')",
-      "input[type='submit']",
-      "[role='button']:has-text('SEARCH')",
-      "[role='button']:has-text('Search')",
-      "[role='button']:has-text('Track')",
-      "button"
-    ]);
-
-    if(!clicked.success){
-      await page.keyboard.press("Enter").catch(function(){});
-    }
-
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(function(){});
-    await page.waitForTimeout(8000);
-
+    await waitForEstesResults(page, tracking);
+    await page.waitForTimeout(3000);
     await expandEstesDetails(page);
     await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(function(){});
-    await page.waitForTimeout(6000);
+    await page.waitForTimeout(4000);
 
-    const report = await getPageReport(page);
-    const finalUrl = page.url();
+    let report = await getPageReport(page);
+    let bodyText = report && report.bodyText ? report.bodyText : "";
+    bodyText = bodyText && cleanTextValue(bodyText).length > 50 ? bodyText : await readReliableBodyText(page);
+    let finalUrl = page.url();
+    let parsedProbe = buildEstesCarrierResponse({
+      carrierName: "Estes Express",
+      tracking: tracking,
+      bodyText: bodyText,
+      finalUrl: finalUrl,
+      title: report && report.title ? report.title : ""
+    });
+
+    if(!parsedProbe.success || !parsedProbe.found){
+      await page.goto("https://www.estes-express.com/myestes/shipment-tracking/", {
+        waitUntil: "domcontentloaded",
+        timeout: 60000
+      });
+
+      await clickPossibleCookieButtons(page);
+      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(function(){});
+      await page.waitForTimeout(3000);
+
+      const submitted = await submitEstesSearch(page, tracking);
+
+      if(!submitted.success){
+        const beforeReport = await getPageReport(page);
+        throw new Error("Estes tracking input was not found. Page report: " + JSON.stringify(beforeReport).slice(0, 2500));
+      }
+
+      await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(function(){});
+      await waitForEstesResults(page, tracking);
+      await page.waitForTimeout(5000);
+      await expandEstesDetails(page);
+      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(function(){});
+      await page.waitForTimeout(5000);
+
+      report = await getPageReport(page);
+      bodyText = report && report.bodyText ? report.bodyText : "";
+      bodyText = bodyText && cleanTextValue(bodyText).length > 50 ? bodyText : await readReliableBodyText(page);
+      finalUrl = page.url();
+    }
 
     await browser.close();
 
     return buildEstesCarrierResponse({
       carrierName: "Estes Express",
       tracking: tracking,
-      bodyText: report && report.bodyText ? report.bodyText : "",
+      bodyText: bodyText,
       finalUrl: finalUrl,
       title: report && report.title ? report.title : ""
     });
@@ -1487,7 +1571,7 @@ async function scrapeEstesTracking(tracking){
       tracking: tracking,
       error: error.message,
       reason: "SCRAPE_ERROR",
-      finalUrl: "https://www.estes-express.com/myestes/shipment-tracking/",
+      finalUrl: "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO",
       events: []
     };
   }
@@ -1496,21 +1580,21 @@ async function scrapeEstesTracking(tracking){
 function buildEstesCarrierResponse(options){
   const text = cleanTextValue(options.bodyText || "");
   const tracking = cleanTracking(options.tracking);
-  const finalUrl = options.finalUrl || "https://www.estes-express.com/myestes/shipment-tracking/";
-  const cookieOnly = text.indexOf("Shipment Tracking") >= 0 &&
-    text.indexOf("Enter tracking numbers") >= 0 &&
-    text.indexOf("Tracking Results") < 0;
-
+  const finalUrl = options.finalUrl || "https://www.estes-express.com/myestes/shipment-tracking/?query=" + encodeURIComponent(tracking) + "&type=PRO";
+  const lower = text.toLowerCase();
+  const blocked = lower.indexOf("captcha") >= 0 || lower.indexOf("verify you are human") >= 0 || lower.indexOf("access denied") >= 0 || lower.indexOf("forbidden") >= 0;
+  const notFound = lower.indexOf("not found") >= 0 || lower.indexOf("no shipment") >= 0 || lower.indexOf("unable to locate") >= 0 || lower.indexOf("no records") >= 0 || lower.indexOf("no results") >= 0;
   const row = parseEstesResultsRow(text, tracking);
   const details = parseEstesExpandedDetails(text, tracking);
-  const hasResults = !!row.pro || !!details.pro;
+  const hasTrackingNumber = text.indexOf(tracking) >= 0 || !!row.pro || !!details.bol;
+  const hasShipmentData = !!row.pro || !!row.bol || !!row.status || details.hasExpandedDetails || details.history.length > 0 || /Shipment Details|Shipment History|Delivery Details|Reference Numbers|Tracking Results|In Transit|Delivered|Picked Up|Out for Delivery/i.test(text);
 
-  if(cookieOnly || !hasResults){
+  if(blocked || notFound || !hasTrackingNumber || !hasShipmentData){
     return {
       success: false,
       found: false,
-      blocked: false,
-      reason: "ESTES_SEARCH_NOT_SUBMITTED",
+      blocked: blocked,
+      reason: blocked ? "CAPTCHA_OR_ACCESS_BLOCK" : notFound ? "NOT_FOUND" : "ESTES_DETAILS_NOT_RETURNED",
       carrier: "Estes Express",
       tracking: tracking,
       pro: tracking,
@@ -1519,7 +1603,10 @@ function buildEstesCarrierResponse(options){
       statusCopy: "Estes page loaded, but shipment details were not returned.",
       service: "",
       handlingUnits: "",
+      pieces: "",
+      totalPieces: "",
       shipmentWeight: "",
+      weight: "",
       packagingType: "",
       eta: {
         date: "",
@@ -1555,10 +1642,12 @@ function buildEstesCarrierResponse(options){
         travelHistory: []
       },
       source: "Render Estes Express",
-      pageText: text.slice(0, 20000),
+      pageText: text.slice(0, 30000),
       debug: {
         title: options.title || "",
-        url: finalUrl
+        url: finalUrl,
+        parsedRow: row,
+        expandedDetailsFound: !!details.hasExpandedDetails
       }
     };
   }
@@ -1570,16 +1659,27 @@ function buildEstesCarrierResponse(options){
   const deliveredDate = details.deliveryDate || "";
   let status = cleanEstesTableStatus(details.status || row.status || "Tracking Found");
 
+  if(!status || status === "Tracking Found"){
+    if(details.history.some(function(event){ return String(event.status || "").toLowerCase().indexOf("delivered") >= 0; })){
+      status = "Delivered";
+    } else if(details.history.some(function(event){ return String(event.status || "").toLowerCase().indexOf("out for delivery") >= 0; })){
+      status = "Out for Delivery";
+    } else if(details.history.some(function(event){ return String(event.status || "").toLowerCase().indexOf("arrived") >= 0 || String(event.status || "").toLowerCase().indexOf("departed") >= 0; })){
+      status = "In Transit";
+    }
+  }
+
   if(/delivery completed\s*-\s*ok/i.test(details.deliveryCompletedText || "")){
     status = "Delivered";
   }
 
+  status = cleanEstesTableStatus(status || "Tracking Found");
   const state = normalizeSimpleState(status);
   const isDelivered = state === "delivered";
-
   const origin = details.shipperAddress || "";
   const destination = details.consigneeAddress || "";
-  const currentLocation = isDelivered ? (destination || "Delivered") : (details.destinationServiceCenterName || "Estes Express");
+  const currentEvent = details.history.slice().reverse().find(function(event){ return event.location && event.location.display; });
+  const currentLocation = isDelivered ? (destination || "Delivered") : currentEvent && currentEvent.location && currentEvent.location.display ? currentEvent.location.display : (details.destinationServiceCenterName || "Estes Express");
   const events = details.history.length ? details.history : [];
 
   if(!events.length && pickupDate){
@@ -1592,7 +1692,7 @@ function buildEstesCarrierResponse(options){
     });
   }
 
-  if(isDelivered){
+  if(isDelivered && !events.some(function(event){ return String(event.status || "").toLowerCase() === "delivered"; })){
     events.push({
       status: "Delivered",
       description: "Delivery Completed - OK",
@@ -1709,63 +1809,27 @@ function parseEstesResultsRow(text, tracking){
     return result;
   }
 
-  const rowText = clean.slice(index, index + 700).replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
+  const rowText = clean.slice(index, index + 1200).replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
+  const simple = rowText.match(/(\d{7,12})\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{4,20})(?:\s+(\d{1,2}\/\d{1,2}\/\d{4}\s*[–\-]\s*\d{1,2}\/\d{1,2}\/\d{4}|\d{1,2}\/\d{1,2}\/\d{4}))?/i);
 
-  const statusStop = "(?:Picked Up|In Transit|Out for Delivery|Delivered\\s+Delivery Completed|Delivery Completed|Shipment Details|Shipping|Track|Pickup Visibility|Services|Support|$)";
-
-  const rangeMatch = rowText.match(new RegExp(
-    "(\\d{7,12})\\s+" +
-    "(\\d{1,2}\\/\\d{1,2}\\/\\d{4})\\s+" +
-    "(\\d{4,20})\\s+" +
-    "(\\d{1,2}\\/\\d{1,2}\\/\\d{4}\\s*[–\\-]\\s*\\d{1,2}\\/\\d{1,2}\\/\\d{4})\\s+" +
-    "([A-Za-z ]+?)\\s*(?=" + statusStop + ")",
-    "i"
-  ));
-
-  if(rangeMatch){
-    result.pro = cleanTextValue(rangeMatch[1]);
-    result.pickupDate = cleanTextValue(rangeMatch[2]);
-    result.bol = cleanTextValue(rangeMatch[3]);
-    result.estimatedDelivery = cleanTextValue(rangeMatch[4]);
-    result.status = cleanEstesTableStatus(rangeMatch[5]);
-    return result;
-  }
-
-  const exactMatch = rowText.match(new RegExp(
-    "(\\d{7,12})\\s+" +
-    "(\\d{1,2}\\/\\d{1,2}\\/\\d{4})\\s+" +
-    "(\\d{4,20})" +
-    "(?:\\s+(\\d{1,2}\\/\\d{1,2}\\/\\d{4}))?\\s+" +
-    "([A-Za-z ]+?)\\s*(?=" + statusStop + ")",
-    "i"
-  ));
-
-  if(exactMatch){
-    result.pro = cleanTextValue(exactMatch[1]);
-    result.pickupDate = cleanTextValue(exactMatch[2]);
-    result.bol = cleanTextValue(exactMatch[3]);
-    result.estimatedDelivery = cleanTextValue(exactMatch[4] || "");
-    result.status = cleanEstesTableStatus(exactMatch[5]);
-    return result;
-  }
-
-  const simple = rowText.match(/(\d{7,12})\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{4,20})/i);
   if(simple){
     result.pro = cleanTextValue(simple[1]);
     result.pickupDate = cleanTextValue(simple[2]);
     result.bol = cleanTextValue(simple[3]);
+    result.estimatedDelivery = cleanTextValue(simple[4] || "");
 
-    const afterBol = rowText.slice(rowText.indexOf(simple[3]) + simple[3].length);
-    const validStatuses = ["Delivered", "Out for Delivery", "In Transit", "Picked Up", "Appointment Pending", "Appointment Required"];
+    const after = rowText.slice(rowText.indexOf(simple[0]) + simple[0].length);
+    const statusMatch = after.match(/\b(Delivered|Out for Delivery|In Transit|Picked Up|Appointment Pending|Appointment Required|Exception)\b/i);
+    if(statusMatch){
+      result.status = cleanEstesTableStatus(statusMatch[1]);
+    }
+  }
+
+  if(!result.status){
+    const validStatuses = ["Delivered", "Out for Delivery", "In Transit", "Picked Up", "Appointment Pending", "Appointment Required", "Exception"];
     for(const status of validStatuses){
-      const statusRegex = new RegExp("\\b" + status.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
-      const statusMatch = afterBol.match(statusRegex);
-      if(statusMatch){
-        const beforeStatus = afterBol.slice(0, statusMatch.index).trim();
-        const range = beforeStatus.match(/(\d{1,2}\/\d{1,2}\/\d{4}\s*[–\-]\s*\d{1,2}\/\d{1,2}\/\d{4}|\d{1,2}\/\d{1,2}\/\d{4})/);
-        if(range){
-          result.estimatedDelivery = cleanTextValue(range[1]);
-        }
+      const statusRegex = new RegExp("\\b" + status.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&") + "\\b", "i");
+      if(statusRegex.test(rowText)){
         result.status = status;
         break;
       }
@@ -1776,29 +1840,25 @@ function parseEstesResultsRow(text, tracking){
 }
 
 function cleanEstesTableStatus(value){
-  let text = cleanTextValue(value);
-  text = text.replace(/\bPicked Up\b.*$/i, "").trim();
-  text = text.replace(/\bIn Transit\b.*$/i, "").trim();
-  text = text.replace(/\bOut for Delivery\b.*$/i, "").trim();
-  text = text.replace(/\bDelivered Delivery Completed.*$/i, "Delivered").trim();
-  text = text.replace(/\bShipment Details\b.*$/i, "").trim();
+  const text = cleanTextValue(value);
+  const lower = text.toLowerCase();
 
-  if(/^delivered$/i.test(text)) return "Delivered";
-  if(/^out for delivery$/i.test(text)) return "Out for Delivery";
-  if(/^in transit$/i.test(text)) return "In Transit";
-  if(/^picked up$/i.test(text)) return "Picked Up";
+  if(lower.indexOf("delivery completed") >= 0 || /^delivered$/i.test(text) || lower.indexOf("delivered") >= 0) return "Delivered";
+  if(lower.indexOf("out for delivery") >= 0) return "Out for Delivery";
+  if(lower.indexOf("in transit") >= 0) return "In Transit";
+  if(lower.indexOf("picked up") >= 0 || lower.indexOf("pickup") >= 0) return "Picked Up";
+  if(lower.indexOf("appointment pending") >= 0) return "Appointment Pending";
+  if(lower.indexOf("appointment required") >= 0) return "Appointment Required";
+  if(lower.indexOf("exception") >= 0) return "Exception";
 
   return text;
 }
-
-
 
 function cleanEstesDateTime(value){
   const text = cleanTextValue(value);
   const match = text.match(/\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?/i);
   return match ? cleanTextValue(match[0]) : text;
 }
-
 
 function parseEstesExpandedDetails(text, tracking){
   const clean = String(text || "").replace(/\u00a0/g, " ");
@@ -1827,6 +1887,7 @@ function parseEstesExpandedDetails(text, tracking){
     destinationServiceCenterEmail: "",
     estimatedDelivery: "",
     service: "Estes LTL Freight",
+    deliveryCompletedText: "",
     history: []
   };
 
@@ -1872,17 +1933,26 @@ function parseEstesExpandedDetails(text, tracking){
   if(row.estimatedDelivery && !result.estimatedDelivery) result.estimatedDelivery = row.estimatedDelivery;
   if(row.status && !result.status) result.status = row.status;
 
-  result.deliveryCompletedText = "";
   if(/Delivery Completed\s*-\s*OK/i.test(flat)){
     result.deliveryCompletedText = "Delivery Completed - OK";
+    result.status = "Delivered";
   }
 
   result.history = parseEstesShipmentHistory(clean);
 
+  if(!result.status && result.history.length){
+    const latest = result.history[result.history.length - 1];
+    if(latest && latest.status){
+      const lowerStatus = String(latest.status).toLowerCase();
+      if(lowerStatus.indexOf("delivered") >= 0) result.status = "Delivered";
+      else if(lowerStatus.indexOf("out for delivery") >= 0) result.status = "Out for Delivery";
+      else if(lowerStatus.indexOf("arrived") >= 0 || lowerStatus.indexOf("departed") >= 0 || lowerStatus.indexOf("in transit") >= 0) result.status = "In Transit";
+      else result.status = latest.status;
+    }
+  }
+
   return result;
 }
-
-
 
 function cleanEstesAddress(value){
   let text = cleanTextValue(value);
@@ -1930,7 +2000,7 @@ function parseEstesServiceCenter(text){
   const start = String(text || "").search(/Destination Service Center/i);
   if(start < 0) return result;
 
-  let chunk = String(text || "").slice(start, start + 1500);
+  let chunk = String(text || "").slice(start, start + 1800);
   const end = chunk.search(/Additional Information|Questions\?|Need a delivery receipt|Shipping\s+Track|Pickup Visibility|Services\s+Support/i);
   if(end > 0){
     chunk = chunk.slice(0, end);
@@ -1971,7 +2041,6 @@ function parseEstesServiceCenter(text){
   return result;
 }
 
-
 function parseEstesShipmentHistory(text){
   const events = [];
   const clean = String(text || "").replace(/\u00a0/g, " ");
@@ -1980,6 +2049,7 @@ function parseEstesShipmentHistory(text){
 
   let end = clean.search(/Delivery Details/i);
   if(end < start) end = clean.search(/Reference Numbers/i);
+  if(end < start) end = clean.search(/Destination Service Center/i);
   if(end < start) end = clean.length;
 
   const chunk = clean.slice(start, end);
@@ -1988,6 +2058,29 @@ function parseEstesShipmentHistory(text){
   }).filter(Boolean);
 
   let activeDate = "";
+
+  function locationFromStatus(status){
+    const atMatch = String(status || "").match(/(?:at|from|to)\s+(.+?,\s*[A-Z]{2})(?:\s+facility|\s+terminal|\s+service center)?/i);
+    if(atMatch && atMatch[1]) return cleanTextValue(atMatch[1]);
+
+    const cityMatch = String(status || "").match(/([A-Za-z .'-]+,\s*[A-Z]{2})/);
+    if(cityMatch && cityMatch[1]) return cleanTextValue(cityMatch[1]);
+
+    return "Estes Express";
+  }
+
+  function addEvent(status, timestamp){
+    const cleanStatus = cleanTextValue(status);
+    if(!cleanStatus || /see more history|shipment history|date|time/i.test(cleanStatus)) return;
+
+    events.push({
+      status: normalizeEstesHistoryStatus(cleanStatus),
+      description: cleanStatus,
+      location: normalizeSimpleLocation(locationFromStatus(cleanStatus)),
+      timestamp: cleanTextValue(timestamp || "Carrier update"),
+      completed: true
+    });
+  }
 
   for(let i = 0; i < lines.length; i++){
     const line = lines[i];
@@ -2003,38 +2096,32 @@ function parseEstesShipmentHistory(text){
     }
 
     const next = lines[i + 1] || "";
-    const timeMatch = next.match(/^(\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}\s*(AM|PM)|\d{1,2}:\d{2}\s*(AM|PM))$/i);
+    const nextNext = lines[i + 2] || "";
 
-    if(timeMatch){
-      const status = line;
-      const timestamp = next.indexOf("/") >= 0 ? next : activeDate ? activeDate + " " + next : next;
-
-      if(!/see more history|shipment history/i.test(status)){
-        events.push({
-          status: normalizeEstesHistoryStatus(status),
-          description: status,
-          location: normalizeSimpleLocation("Estes Express"),
-          timestamp: timestamp,
-          completed: true
-        });
-      }
-
+    if(/^\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}\s*(AM|PM)$/i.test(next)){
+      addEvent(line, next);
       i++;
+      continue;
+    }
+
+    if(/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(next) && activeDate){
+      addEvent(line, activeDate + " " + next);
+      i++;
+      continue;
+    }
+
+    if(/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(next) && /^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(nextNext)){
+      addEvent(line, next + " " + nextNext);
+      i += 2;
     }
   }
 
   if(!events.length){
     const flat = chunk.replace(/\n+/g, " ").replace(/\s+/g, " ");
-    const regex = /(Delivery Completed\s*-\s*OK|Delivery in Progress\s*–?\s*Freight Given to Consignee for Unloading|Unload at Delivery Location|Arrived at Delivery Location|Out for Delivery)\s+(\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
+    const regex = /(Delivery Completed\s*-\s*OK|Delivery in Progress\s*[–-]?\s*Freight Given to Consignee for Unloading|Unload at Delivery Location|Arrived at Delivery Location|Out for Delivery|Arrived at .+? facility|Departed .+? facility|Picked up)\s+(\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
     let match;
     while((match = regex.exec(flat)) !== null){
-      events.push({
-        status: normalizeEstesHistoryStatus(match[1]),
-        description: cleanTextValue(match[1]),
-        location: normalizeSimpleLocation("Estes Express"),
-        timestamp: cleanTextValue(match[2]),
-        completed: true
-      });
+      addEvent(match[1], match[2]);
     }
   }
 
@@ -2048,8 +2135,10 @@ function normalizeEstesHistoryStatus(value){
   if(lower.indexOf("delivery completed") >= 0) return "Delivered";
   if(lower.indexOf("delivery in progress") >= 0) return "Delivery In Progress";
   if(lower.indexOf("unload") >= 0) return "Unload At Delivery Location";
-  if(lower.indexOf("arrived") >= 0) return "Arrived At Delivery Location";
   if(lower.indexOf("out for delivery") >= 0) return "Out For Delivery";
+  if(lower.indexOf("departed") >= 0) return "Departed";
+  if(lower.indexOf("arrived") >= 0) return "Arrived At Facility";
+  if(lower.indexOf("picked") >= 0) return "Picked Up";
 
   return text || "Carrier Update";
 }
